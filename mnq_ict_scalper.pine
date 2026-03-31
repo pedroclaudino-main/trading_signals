@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("MNQ ICT Scalper v2 — OB Break + FVG Touch", overlay=true, max_bars_back=500)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
