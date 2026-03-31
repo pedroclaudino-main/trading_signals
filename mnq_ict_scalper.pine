@@ -14,10 +14,15 @@ maxRiskPts    = input.float(60.0,"Max Risk (points)",               minval=10.0)
 inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
 inSession2 = not na(time(timeframe.period, "1545-1615:1234567", "Europe/Lisbon"))
 inSession3 = not na(time(timeframe.period, "1645-1715:1234567", "Europe/Lisbon"))
-inSession    = inSession1 or inSession2 or inSession3
-sessionLabel = inSession1 ? "14:45" : inSession2 ? "15:45" : "16:45"
+inSession  = inSession1 or inSession2 or inSession3
+
+// FIX #11: session label só é definido dentro de uma sessão ativa
+sessionLabel = inSession1 ? "14:45" : inSession2 ? "15:45" : inSession3 ? "16:45" : "N/A"
 
 bgcolor(inSession ? color.new(color.blue, 92) : na, title="Session Window")
+
+// ── FIX #8: Arredondamento ao tick de 0.25 (tamanho mínimo do MNQ) ─────────
+roundTick(x) => math.round(x * 4) / 4
 
 // ── Order Block Detection ──────────────────────────────────────────────────
 isBullishOB(i) => close[i] < open[i] and close[i-1] > open[i-1] and (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
@@ -52,22 +57,65 @@ if bearBreakNow
     bearOB_broken := true
     bias          := "BEARISH"
 
-if not inSession
+// FIX #9: Bias reseta no início de cada nova janela de sessão (não em cada barra fora de sessão)
+sessionStarted = inSession and not inSession[1]
+if sessionStarted
     bias := "NONE"
 
-// ── Fair Value Gap Detection ───────────────────────────────────────────────
-bullFVG_top    = low[0]  > high[2] ? low[0]  : na
-bullFVG_bottom = low[0]  > high[2] ? high[2] : na
-bearFVG_top    = high[0] < low[2]  ? high[0] : na
-bearFVG_bottom = high[0] < low[2]  ? low[2]  : na
+// ── FIX #2 + #3 + #6: FVG persistidos com var, bearFVG top/bottom corrigidos ─
+// Bullish FVG: gap up → low[0] > high[2]
+//   top    = low[0]  (preço mais alto — limite superior do gap)
+//   bottom = high[2] (preço mais baixo — limite inferior do gap)
+//
+// Bearish FVG: gap down → high[0] < low[2]
+//   FIX #3: top    = low[2]  (preço mais alto — limite superior do gap)  ← era high[0] ERRADO
+//   FIX #3: bottom = high[0] (preço mais baixo — limite inferior do gap) ← era low[2]  ERRADO
 
-isBullFVG = not na(bullFVG_top)
-isBearFVG = not na(bearFVG_top)
+var float bullFVG_top    = na
+var float bullFVG_bottom = na
+var int   bullFVG_bar    = na
+var bool  bullFVG_active = false
 
-if isBullFVG
-    box.new(bar_index-2, bullFVG_top, bar_index+15, bullFVG_bottom, border_color=color.new(color.green,50), bgcolor=color.new(color.green,88))
-if isBearFVG
-    box.new(bar_index-2, bearFVG_top, bar_index+15, bearFVG_bottom, border_color=color.new(color.red,50),   bgcolor=color.new(color.red,88))
+var float bearFVG_top    = na
+var float bearFVG_bottom = na
+var int   bearFVG_bar    = na
+var bool  bearFVG_active = false
+
+// FIX #7: guardar referência das boxes para eliminar as antigas
+var box lastBullBox = na
+var box lastBearBox = na
+
+newBullFVG = low[0] > high[2]
+newBearFVG = high[0] < low[2]
+
+if newBullFVG
+    bullFVG_top    := low[0]
+    bullFVG_bottom := high[2]
+    bullFVG_bar    := bar_index
+    bullFVG_active := true
+    box.delete(lastBullBox)
+    lastBullBox    := box.new(bar_index - 2, bullFVG_top, bar_index + 20, bullFVG_bottom,
+                               border_color = color.new(color.green, 50),
+                               bgcolor      = color.new(color.green, 88))
+
+if newBearFVG
+    bearFVG_top    := low[2]   // FIX #3: preço mais alto (limite superior)
+    bearFVG_bottom := high[0]  // FIX #3: preço mais baixo (limite inferior)
+    bearFVG_bar    := bar_index
+    bearFVG_active := true
+    box.delete(lastBearBox)
+    lastBearBox    := box.new(bar_index - 2, bearFVG_top, bar_index + 20, bearFVG_bottom,
+                               border_color = color.new(color.red, 50),
+                               bgcolor      = color.new(color.red, 88))
+
+// FIX #4: FVG expira após 20 barras sem toque
+if bullFVG_active and (bar_index - bullFVG_bar) > 20
+    bullFVG_active := false
+    box.delete(lastBullBox)
+
+if bearFVG_active and (bar_index - bearFVG_bar) > 20
+    bearFVG_active := false
+    box.delete(lastBearBox)
 
 // ── Swing Points for SL ────────────────────────────────────────────────────
 swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
@@ -83,23 +131,40 @@ if not na(swingLow)
 plotshape(not na(swingHigh), style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   60), size=size.tiny, offset=-swingLookback)
 plotshape(not na(swingLow),  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 60), size=size.tiny, offset=-swingLookback)
 
-// ── Entry: price touches aligned FVG after OB break ───────────────────────
-touchesBullFVG = bias == "BULLISH" and isBullFVG and low  <= bullFVG_top    and low  >= bullFVG_bottom
-touchesBearFVG = bias == "BEARISH" and isBearFVG and high >= bearFVG_bottom and high <= bearFVG_top
+// ── FIX #2: Toque no FVG numa barra FUTURA (não na mesma barra de deteção) ─
+// A guarda "not newBullFVG" / "not newBearFVG" impede o toque na barra de criação.
+// FIX #3: bearFVG_bottom/top agora têm os preços corretos → condição possível.
+touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
+               and low <= bullFVG_top and low >= bullFVG_bottom
+
+touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
+               and high >= bearFVG_bottom and high <= bearFVG_top
+
+// Invalidar FVG após toque para evitar entradas múltiplas no mesmo FVG
+if touchesBullFVG
+    bullFVG_active := false
+
+if touchesBearFVG
+    bearFVG_active := false
 
 longSignal  = inSession and touchesBullFVG and not na(lastSwingLow)
 shortSignal = inSession and touchesBearFVG and not na(lastSwingHigh)
 
-// ── Calculate levels ───────────────────────────────────────────────────────
-longEntry = longSignal  ? close          : na
-longSL    = longSignal  ? lastSwingLow   : na
-longTP    = longSignal  ? close + (close - lastSwingLow)  * 2.0 : na
-longRisk  = longSignal  ? close - lastSwingLow  : na
+// FIX: proteger contra sinal duplo simultâneo — se ambos ativos, nenhum dispara
+if longSignal and shortSignal
+    longSignal  := false
+    shortSignal := false
 
-shortEntry = shortSignal ? close         : na
-shortSL    = shortSignal ? lastSwingHigh : na
-shortTP    = shortSignal ? close - (lastSwingHigh - close) * 2.0 : na
-shortRisk  = shortSignal ? lastSwingHigh - close : na
+// ── FIX #1 + #8: Entry = limite do FVG, TP/SL arredondados ao tick de 0.25 ─
+longEntry = longSignal  ? roundTick(bullFVG_bottom) : na   // FIX #1: bottom do FVG bullish
+longSL    = longSignal  ? roundTick(lastSwingLow)   : na
+longTP    = longSignal  ? roundTick(bullFVG_bottom + (bullFVG_bottom - lastSwingLow) * 2.0) : na
+longRisk  = longSignal  ? bullFVG_bottom - lastSwingLow : na
+
+shortEntry = shortSignal ? roundTick(bearFVG_top)    : na  // FIX #1: top do FVG bearish
+shortSL    = shortSignal ? roundTick(lastSwingHigh)  : na
+shortTP    = shortSignal ? roundTick(bearFVG_top - (lastSwingHigh - bearFVG_top) * 2.0) : na
+shortRisk  = shortSignal ? lastSwingHigh - bearFVG_top : na
 
 validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <= maxRiskPts
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
@@ -112,31 +177,45 @@ plotshape(bearBreakNow, title="Bear OB Break", style=shape.labeldown, location=l
 
 // ── Diagnóstico (podes remover depois) ────────────────────────────────────
 plotchar(inSession,          "In Session", "S", location.top,      color.yellow, size=size.tiny)
-plotchar(isBullFVG,          "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
-plotchar(isBearFVG,          "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
+plotchar(bullFVG_active,     "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
+plotchar(bearFVG_active,     "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
 plotchar(bias == "BULLISH",  "Bias Bull",  "B", location.abovebar, color.lime,   size=size.tiny)
 plotchar(bias == "BEARISH",  "Bias Bear",  "B", location.belowbar, color.orange, size=size.tiny)
 
-// ── Webhook payload ────────────────────────────────────────────────────────
+// ── FIX #5 + #10: Webhook payload com campos corretos e proteção contra na ─
 if (validLong or validShort) and barstate.isconfirmed
     entryPrice = validLong ? longEntry  : shortEntry
     slPrice    = validLong ? longSL     : shortSL
     tpPrice    = validLong ? longTP     : shortTP
     riskPts    = validLong ? longRisk   : shortRisk
+    obHigh     = validLong ? bullOB_high : bearOB_high
+    obLow      = validLong ? bullOB_low  : bearOB_low
+    fvgTop     = validLong ? bullFVG_top    : bearFVG_top
+    fvgBottom  = validLong ? bullFVG_bottom : bearFVG_bottom
     fvgType    = validLong ? "bullish"  : "bearish"
     obType     = validLong ? "bullish"  : "bearish"
+
+    // FIX #10: proteger swing points contra na → "null" em vez de NaN no JSON
+    swingLowStr  = not na(lastSwingLow)  ? str.tostring(lastSwingLow,  "#.##") : "null"
+    swingHighStr = not na(lastSwingHigh) ? str.tostring(lastSwingHigh, "#.##") : "null"
 
     payload  = '{"bot_token":"'    + BOT_TOKEN    + '",'
     payload += '"chat_id":"'       + CHAT_ID      + '",'
     payload += '"session":"'       + sessionLabel + '",'
     payload += '"current_price":'  + str.tostring(close, "#.##") + ','
-    payload += '"candles":['
+    // FIX #5: campo renomeado de "candles" para "candles_1m"
+    payload += '"candles_1m":['
     payload += '{"o":' + str.tostring(open,    "#.##") + ',"h":' + str.tostring(high,    "#.##") + ',"l":' + str.tostring(low,    "#.##") + ',"c":' + str.tostring(close,    "#.##") + '},'
     payload += '{"o":' + str.tostring(open[1], "#.##") + ',"h":' + str.tostring(high[1], "#.##") + ',"l":' + str.tostring(low[1], "#.##") + ',"c":' + str.tostring(close[1], "#.##") + '},'
     payload += '{"o":' + str.tostring(open[2], "#.##") + ',"h":' + str.tostring(high[2], "#.##") + ',"l":' + str.tostring(low[2], "#.##") + ',"c":' + str.tostring(close[2], "#.##") + '}],'
-    payload += '"broken_ob":{"type":"' + obType + '","high":' + str.tostring(validLong ? bullOB_high : bearOB_high, "#.##") + ',"low":' + str.tostring(validLong ? bullOB_low : bearOB_low, "#.##") + '},'
-    payload += '"fvgs":[{"type":"' + fvgType + '","top":' + str.tostring(validLong ? bullFVG_top : bearFVG_top, "#.##") + ',"bottom":' + str.tostring(validLong ? bullFVG_bottom : bearFVG_bottom, "#.##") + ',"after_ob_break":true}],'
-    payload += '"swing_points":[{"type":"low","price":' + str.tostring(lastSwingLow, "#.##") + '},{"type":"high","price":' + str.tostring(lastSwingHigh, "#.##") + '}],'
-    payload += '"pre_calculated":{"entry":' + str.tostring(entryPrice, "#.##") + ',"sl":' + str.tostring(slPrice, "#.##") + ',"tp":' + str.tostring(tpPrice, "#.##") + ',"risk_pts":' + str.tostring(riskPts, "#.##") + '}}'
+    payload += '"broken_ob":{"type":"' + obType + '","high":' + str.tostring(obHigh, "#.##") + ',"low":' + str.tostring(obLow, "#.##") + '},'
+    payload += '"fvgs":[{"type":"' + fvgType + '","top":' + str.tostring(fvgTop, "#.##") + ',"bottom":' + str.tostring(fvgBottom, "#.##") + ',"after_ob_break":true}],'
+    // FIX #5: campo renomeado de "swing_points" para "swings"
+    payload += '"swings":[{"type":"low","price":' + swingLowStr + '},{"type":"high","price":' + swingHighStr + '}],'
+    // FIX #5: estrutura simplificada para "suggested_entry" e "suggested_sl" (era "pre_calculated")
+    payload += '"suggested_entry":' + str.tostring(entryPrice, "#.##") + ','
+    payload += '"suggested_sl":'    + str.tostring(slPrice,    "#.##") + ','
+    payload += '"tp":'              + str.tostring(tpPrice,    "#.##") + ','
+    payload += '"risk_pts":'        + str.tostring(riskPts,    "#.##") + '}'
 
     alert(payload, alert.freq_once_per_bar_close)
