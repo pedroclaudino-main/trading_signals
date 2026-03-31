@@ -2,9 +2,9 @@
 indicator("MNQ ICT Scalper v2 — OB Break + FVG Touch", overlay=true, max_bars_back=500)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-var string WEBHOOK_URL = input.string("https://SEU-PROJETO.railway.app/webhook", "Webhook URL")
-var string BOT_TOKEN   = input.string("SEU_BOT_TOKEN", "Telegram Bot Token")
-var string CHAT_ID     = input.string("SEU_CHAT_ID",   "Telegram Chat ID")
+var string WEBHOOK_URL = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
+var string BOT_TOKEN   = input.string("", "Telegram Bot Token")
+var string CHAT_ID     = input.string("", "Telegram Chat ID")
 
 swingLookback = input.int(5,  "Swing Lookback (bars)", minval=2, maxval=20)
 obStrength    = input.float(1.5, "OB Break Strength (multiplier)", minval=1.0, maxval=3.0)
