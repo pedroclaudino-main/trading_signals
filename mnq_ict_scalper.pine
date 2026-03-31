@@ -1,0 +1,180 @@
+//@version=5
+indicator("MNQ ICT Scalper v2 — OB Break + FVG Touch", overlay=true, max_bars_back=500)
+
+// ── Inputs ─────────────────────────────────────────────────────────────────
+var string WEBHOOK_URL = input.string("https://SEU-PROJETO.railway.app/webhook", "Webhook URL")
+var string BOT_TOKEN   = input.string("SEU_BOT_TOKEN", "Telegram Bot Token")
+var string CHAT_ID     = input.string("SEU_CHAT_ID",   "Telegram Chat ID")
+
+swingLookback = input.int(5,  "Swing Lookback (bars)", minval=2, maxval=20)
+obStrength    = input.float(1.5, "OB Break Strength (multiplier)", minval=1.0, maxval=3.0)
+maxRiskPts    = input.float(60.0, "Max Risk (points)", minval=10.0)
+
+// ── Session windows (Lisbon WET/WEST) ─────────────────────────────────────
+session1 = time(timeframe.period, "1445-1515:1234567")
+session2 = time(timeframe.period, "1545-1615:1234567")
+session3 = time(timeframe.period, "1645-1715:1234567")
+inSession    = not na(session1) or not na(session2) or not na(session3)
+sessionLabel = not na(session1) ? "14:45" : not na(session2) ? "15:45" : "16:45"
+
+bgcolor(inSession ? color.new(color.blue, 92) : na, title="Session Window")
+
+// ── Order Block Detection (1m) ─────────────────────────────────────────────
+// Bearish OB: last bullish candle before a strong bearish move
+// Bullish OB: last bearish candle before a strong bullish move
+isBullishOB(i) =>
+    close[i] < open[i] and
+    close[i-1] > open[i-1] and
+    (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
+
+isBearishOB(i) =>
+    close[i] > open[i] and
+    close[i-1] < open[i-1] and
+    (open[i-1] - close[i-1]) > (high[i] - low[i]) * obStrength
+
+// Most recent OBs
+var float bullOB_high = na
+var float bullOB_low  = na
+var float bearOB_high = na
+var float bearOB_low  = na
+var bool  bullOB_broken = false
+var bool  bearOB_broken = false
+var string bias = "NONE"  // "BULLISH" | "BEARISH" | "NONE"
+
+// Detect new OBs
+if isBullishOB(1)
+    bullOB_high   := high[1]
+    bullOB_low    := low[1]
+    bullOB_broken := false
+
+if isBearishOB(1)
+    bearOB_high   := high[1]
+    bearOB_low    := low[1]
+    bearOB_broken := false
+
+// Detect OB break → establishes bias
+bullBreakNow = not bullOB_broken and not na(bullOB_high) and close > bullOB_high
+bearBreakNow = not bearOB_broken and not na(bearOB_low)  and close < bearOB_low
+
+if bullBreakNow
+    bullOB_broken := true
+    bias := "BULLISH"
+
+if bearBreakNow
+    bearOB_broken := true
+    bias := "BEARISH"
+
+// Reset bias when a new opposing OB is broken in same session
+if not inSession
+    bias := "NONE"
+
+// ── Fair Value Gap Detection (1m) ─────────────────────────────────────────
+// Bullish FVG: gap up — candle[0].low > candle[2].high
+// Bearish FVG: gap down — candle[0].high < candle[2].low
+bullFVG_top    = low[0] > high[2]  ? low[0]  : na
+bullFVG_bottom = low[0] > high[2]  ? high[2] : na
+bearFVG_top    = high[0] < low[2]  ? high[0] : na
+bearFVG_bottom = high[0] < low[2]  ? low[2]  : na
+
+isBullFVG = not na(bullFVG_top)
+isBearFVG = not na(bearFVG_top)
+
+// Draw FVG boxes
+if isBullFVG
+    box.new(bar_index-2, bullFVG_top, bar_index+15, bullFVG_bottom,
+            border_color=color.new(color.green, 50),
+            bgcolor=color.new(color.green, 88))
+
+if isBearFVG
+    box.new(bar_index-2, bearFVG_top, bar_index+15, bearFVG_bottom,
+            border_color=color.new(color.red, 50),
+            bgcolor=color.new(color.red, 88))
+
+// ── Swing Points for SL ────────────────────────────────────────────────────
+swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
+swingLow  = ta.pivotlow (low,  swingLookback, swingLookback)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+if not na(swingLow)
+    lastSwingLow  := swingLow
+
+plotshape(not na(swingHigh), style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   60), size=size.tiny, offset=-swingLookback)
+plotshape(not na(swingLow),  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 60), size=size.tiny, offset=-swingLookback)
+
+// ── Entry: price TOUCHES aligned FVG after OB break ───────────────────────
+// Bullish bias → price touches bullish FVG top (returning to gap)
+// Bearish bias → price touches bearish FVG bottom (returning to gap)
+touchesBullFVG = bias == "BULLISH" and isBullFVG and low <= bullFVG_top and low >= bullFVG_bottom
+touchesBearFVG = bias == "BEARISH" and isBearFVG and high >= bearFVG_bottom and high <= bearFVG_top
+
+longSignal  = inSession and touchesBullFVG and not na(lastSwingLow)
+shortSignal = inSession and touchesBearFVG and not na(lastSwingHigh)
+
+// ── Calculate levels ───────────────────────────────────────────────────────
+longEntry  = longSignal  ? close : na
+longSL     = longSignal  ? lastSwingLow  : na
+longTP     = longSignal  ? close + (close - lastSwingLow) * 2.0 : na
+longRisk   = longSignal  ? close - lastSwingLow : na
+
+shortEntry = shortSignal ? close : na
+shortSL    = shortSignal ? lastSwingHigh : na
+shortTP    = shortSignal ? close - (lastSwingHigh - close) * 2.0 : na
+shortRisk  = shortSignal ? lastSwingHigh - close : na
+
+// Filter: skip if risk > maxRiskPts
+validLong  = longSignal  and longRisk  <= maxRiskPts
+validShort = shortSignal and shortRisk <= maxRiskPts
+
+// ── Plot entries ───────────────────────────────────────────────────────────
+plotshape(validLong,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.normal)
+plotshape(validShort, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.normal)
+
+// OB break markers
+plotshape(bullBreakNow, title="Bull OB Break", style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,  30), size=size.tiny, text="OB✓")
+plotshape(bearBreakNow, title="Bear OB Break", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange,30), size=size.tiny, text="OB✓")
+
+// ── Webhook payload ────────────────────────────────────────────────────────
+if (validLong or validShort) and barstate.isconfirmed
+    entryPrice = validLong ? longEntry  : shortEntry
+    slPrice    = validLong ? longSL     : shortSL
+    tpPrice    = validLong ? longTP     : shortTP
+    riskPts    = validLong ? longRisk   : shortRisk
+    fvgType    = validLong ? "bullish"  : "bearish"
+    obType     = validLong ? "bullish"  : "bearish"
+
+    payload = '{'
+    payload += '"bot_token":"'    + BOT_TOKEN   + '",'
+    payload += '"chat_id":"'      + CHAT_ID     + '",'
+    payload += '"session":"'      + sessionLabel + '",'
+    payload += '"current_price":' + str.tostring(close, "#.##") + ','
+
+    payload += '"candles":['
+    payload += '{"o":' + str.tostring(open,   "#.##") + ',"h":' + str.tostring(high,   "#.##") + ',"l":' + str.tostring(low,   "#.##") + ',"c":' + str.tostring(close,   "#.##") + '},'
+    payload += '{"o":' + str.tostring(open[1],"#.##") + ',"h":' + str.tostring(high[1],"#.##") + ',"l":' + str.tostring(low[1],"#.##") + ',"c":' + str.tostring(close[1],"#.##") + '},'
+    payload += '{"o":' + str.tostring(open[2],"#.##") + ',"h":' + str.tostring(high[2],"#.##") + ',"l":' + str.tostring(low[2],"#.##") + ',"c":' + str.tostring(close[2],"#.##") + '}'
+    payload += '],'
+
+    payload += '"broken_ob":{"type":"' + obType + '","high":' + str.tostring(validLong ? bullOB_high : bearOB_high, "#.##") + ',"low":' + str.tostring(validLong ? bullOB_low : bearOB_low, "#.##") + '},'
+
+    payload += '"fvgs":[{"type":"' + fvgType + '",'
+    payload += '"top":'    + str.tostring(validLong ? bullFVG_top    : bearFVG_top,    "#.##") + ','
+    payload += '"bottom":' + str.tostring(validLong ? bullFVG_bottom : bearFVG_bottom, "#.##") + ','
+    payload += '"after_ob_break":true}],'
+
+    payload += '"swing_points":['
+    payload += '{"type":"low","price":'  + str.tostring(lastSwingLow,  "#.##") + '},'
+    payload += '{"type":"high","price":' + str.tostring(lastSwingHigh, "#.##") + '}'
+    payload += '],'
+
+    payload += '"pre_calculated":{'
+    payload += '"entry":' + str.tostring(entryPrice, "#.##") + ','
+    payload += '"sl":'    + str.tostring(slPrice,    "#.##") + ','
+    payload += '"tp":'    + str.tostring(tpPrice,    "#.##") + ','
+    payload += '"risk_pts":' + str.tostring(riskPts, "#.##")
+    payload += '}}'
+
+    alert(payload, alert.freq_once_per_bar_close)

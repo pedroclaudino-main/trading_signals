@@ -1,0 +1,17 @@
+{
+  "name": "mnq-trade-server",
+  "version": "1.0.0",
+  "description": "ICT scalping signal server for CME_MINI:MNQH2026",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
