@@ -22,8 +22,7 @@ strategy(
  commission_type        = strategy.commission.cash_per_contract,
  commission_value       = 0.62,   // $ por contrato por lado (ajustável nos Inputs)
  slippage               = 1,      // ticks de slippage (1 tick = 0.25 pts)
- process_orders_on_close= true,   // executa na barra de sinal (mais realista para 1m)
- calc_on_every_tick     = false,  // FIX warning barstate.islast: estratégia calcula em barras confirmadas
+ calc_on_every_tick     = false,  // calcula apenas em barras confirmadas (sem warnings)
  pyramiding             = 0)      // sem entradas adicionais enquanto trade aberta
 
 // ── Inputs — Estratégia ────────────────────────────────────────────────────
@@ -183,21 +182,44 @@ validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
 
 // ── Execução da estratégia ─────────────────────────────────────────────────
-// Só abre nova trade se não houver posição aberta (pyramiding=0 garante isso)
+// Os níveis de TP/SL são guardados em var para estarem disponíveis em todas as
+// barras enquanto a posição está aberta — strategy.exit() DEVE ser chamado em
+// cada barra, não apenas na barra de sinal, para o broker simulado funcionar.
 
-if validLong and strategy.position_size == 0
+var float activeLongTP  = na
+var float activeLongSL  = na
+var float activeShortTP = na
+var float activeShortSL = na
+
+if validLong
+    activeLongTP := longTP
+    activeLongSL := longSL
     strategy.entry("Long", strategy.long, qty=i_contracts,
                    comment="LONG | " + sessionLabel + " | OB+FVG")
-    strategy.exit("Long Exit", from_entry="Long",
-                   limit=longTP, stop=longSL,
-                   comment_profit="TP ✓", comment_loss="SL ✗")
 
-if validShort and strategy.position_size == 0
+if validShort
+    activeShortTP := shortTP
+    activeShortSL := shortSL
     strategy.entry("Short", strategy.short, qty=i_contracts,
                    comment="SHORT | " + sessionLabel + " | OB+FVG")
-    strategy.exit("Short Exit", from_entry="Short",
-                   limit=shortTP, stop=shortSL,
+
+// Exit chamado em CADA BARRA enquanto posição aberta — padrão canónico Pine Script
+if strategy.position_size > 0 and not na(activeLongTP)
+    strategy.exit("Long Exit", from_entry="Long",
+                   limit=activeLongTP, stop=activeLongSL,
                    comment_profit="TP ✓", comment_loss="SL ✗")
+
+if strategy.position_size < 0 and not na(activeShortTP)
+    strategy.exit("Short Exit", from_entry="Short",
+                   limit=activeShortTP, stop=activeShortSL,
+                   comment_profit="TP ✓", comment_loss="SL ✗")
+
+// Limpar níveis guardados quando não há posição aberta
+if strategy.position_size == 0
+    activeLongTP  := na
+    activeLongSL  := na
+    activeShortTP := na
+    activeShortSL := na
 
 // ── Labels de Entry / TP / SL no gráfico (opcional) ───────────────────────
 if validLong and i_showLabels
