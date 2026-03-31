@@ -1,5 +1,5 @@
 //@version=6
-indicator("MNQ ICT Scalper v2 — OB Break + FVG Touch", overlay=true, max_bars_back=500)
+indicator("Trading Signals", overlay=true, max_bars_back=500)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
 var string WEBHOOK_URL = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
