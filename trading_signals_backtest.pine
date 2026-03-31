@@ -214,12 +214,16 @@ if strategy.position_size < 0 and not na(activeShortTP)
                    limit=activeShortTP, stop=activeShortSL,
                    comment_profit="TP ✓", comment_loss="SL ✗")
 
-// Limpar níveis guardados quando não há posição aberta
-if strategy.position_size == 0
+// Limpar níveis guardados apenas quando uma posição FECHA (transição de aberta→fechada)
+// NÃO limpar quando position_size==0 genérico, porque na barra de sinal a entry
+// ainda não preencheu e position_size ainda é 0 — o que apagava o TP/SL.
+var float prevPosSize = 0.0
+if strategy.position_size == 0 and prevPosSize != 0
     activeLongTP  := na
     activeLongSL  := na
     activeShortTP := na
     activeShortSL := na
+prevPosSize := strategy.position_size
 
 // ── Labels de Entry / TP / SL no gráfico (opcional) ───────────────────────
 if validLong and i_showLabels
