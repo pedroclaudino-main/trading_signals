@@ -10,7 +10,7 @@ strategy("Trading_Signals — Backtest", overlay=true, max_bars_back=500,
  initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=1,
  commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
  slippage=1, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=true,
- margin_long=5, margin_short=5)
+ margin_long=5, margin_short=5, max_labels_count=200)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
 swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2,   maxval=20,   group="Estratégia")
@@ -184,7 +184,7 @@ if validShort
 if sessionEnded and strategy.position_size != 0
     strategy.close_all(comment="Fim Sessão")
 
-// ── Plot entries (plot = fixo no preço, nunca flutua) ──────────────────────
+// ── Marcadores fixos no preço (plot) + labels com texto (sinais raros) ─────
 plot(validLong  ? longEntry  : na, title="Long Entry",  style=plot.style_circles, color=color.green,                 linewidth=4)
 plot(validLong  ? longTP     : na, title="Long TP",     style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
 plot(validLong  ? longSL     : na, title="Long SL",     style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
@@ -195,14 +195,26 @@ plot(bullBreakNow ? bullOB_high : na, title="Bull OB Break", style=plot.style_ci
 plot(bearBreakNow ? bearOB_low  : na, title="Bear OB Break", style=plot.style_circles, color=color.orange, linewidth=3)
 bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
-// ── Diagnóstico (visível apenas no Data Window, não polui o gráfico) ──────
+// Labels de texto — apenas nos sinais (raros, não poluem)
+if validLong
+    label.new(bar_index, longEntry, text="▲ LONG\nE " + str.tostring(longEntry, "#.##") + "\nTP " + str.tostring(longTP, "#.##") + "\nSL " + str.tostring(longSL, "#.##"),
+              style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+if validShort
+    label.new(bar_index, shortEntry, text="▼ SHORT\nE " + str.tostring(shortEntry, "#.##") + "\nTP " + str.tostring(shortTP, "#.##") + "\nSL " + str.tostring(shortSL, "#.##"),
+              style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+if bullBreakNow
+    label.new(bar_index, bullOB_high, text="OB✓", style=label.style_label_up, color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+if bearBreakNow
+    label.new(bar_index, bearOB_low, text="OB✓", style=label.style_label_down, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
+
+// ── Diagnóstico (visível apenas no Data Window) ───────────────────────────
 plotchar(inSession,          "In Session", char="", location=location.top,      color=color.yellow, display=display.data_window)
 plotchar(bullFVG_active,     "Bull FVG",   char="", location=location.abovebar, color=color.green,  display=display.data_window)
 plotchar(bearFVG_active,     "Bear FVG",   char="", location=location.belowbar, color=color.red,    display=display.data_window)
 plotchar(bias == "BULLISH",  "Bias Bull",  char="", location=location.abovebar, color=color.lime,   display=display.data_window)
 plotchar(bias == "BEARISH",  "Bias Bear",  char="", location=location.belowbar, color=color.orange, display=display.data_window)
 
-// ── Tabela de diagnóstico ──────────────────────────────────────────────────
+// ── Tabela: legenda + diagnóstico (canto superior direito) ─────────────────
 var int longCount  = 0
 var int shortCount = 0
 if validLong
@@ -210,13 +222,31 @@ if validLong
 if validShort
     shortCount += 1
 
-var table t = table.new(position.top_right, 2, 4, border_color=color.gray, border_width=1, bgcolor=color.new(color.black, 70))
+var table t = table.new(position.top_right, 2, 12, border_color=color.new(color.gray, 60), border_width=1, bgcolor=color.new(color.black, 80))
 if barstate.islastconfirmedhistory or barstate.islast
-    table.cell(t, 0, 0, "Sinais Long",  text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 0, str.tostring(longCount),  text_color=color.green,  text_size=size.small)
-    table.cell(t, 0, 1, "Sinais Short", text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 1, str.tostring(shortCount), text_color=color.red,    text_size=size.small)
-    table.cell(t, 0, 2, "Trades",       text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 2, str.tostring(strategy.closedtrades), text_color=color.yellow, text_size=size.small)
-    table.cell(t, 0, 3, "Posição",      text_color=color.white,  text_size=size.small)
-    table.cell(t, 1, 3, str.tostring(strategy.position_size), text_color=color.yellow, text_size=size.small)
+    // Legenda
+    table.cell(t, 0, 0, "LEGENDA",          text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 0, "",                  text_size=size.small)
+    table.cell(t, 0, 1, "● Verde",           text_color=color.green,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 1, "Long Entry",        text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 2, "● Vermelho",        text_color=color.red,    text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 2, "Short Entry",       text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 3, "✕ Verde/Verm",      text_color=color.green,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 3, "TP / SL",           text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 4, "✕ Verm/Verde",      text_color=color.red,    text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 4, "Swing High / Low",  text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 5, "● Lima",            text_color=color.lime,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 5, "Bull OB Break",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 6, "● Laranja",         text_color=color.orange, text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 6, "Bear OB Break",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 7, "█ Azul",            text_color=color.blue,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 7, "Sessão ativa",      text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    // Diagnóstico
+    table.cell(t, 0, 8, "───────",           text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 8, "───────",           text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 9,  "Sinais Long",      text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 9,  str.tostring(longCount),           text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 10, "Sinais Short",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 10, str.tostring(shortCount),          text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 11, "Trades",           text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 11, str.tostring(strategy.closedtrades), text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
