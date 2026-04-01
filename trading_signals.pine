@@ -218,3 +218,4 @@ if (validLong or validShort) and barstate.isconfirmed
     payload += '"risk_pts":'        + str.tostring(riskPts,    "#.##") + '}'
 
     alert(payload, alert.freq_once_per_bar_close)
+
