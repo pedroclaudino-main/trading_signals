@@ -35,7 +35,9 @@ atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxva
 minFvgMult    = input.float(0.05, "FVG Min Size (× ATR)",      minval=0.01,maxval=1.0, group="Filtros")
 useDispFilter = input.bool (true, "Filtro: Deslocamento OB",                           group="Filtros")
 useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                           group="Filtros")
-useHTFFilter  = input.bool (false,"Filtro: HTF 5m EMA50",                              group="Filtros")
+
+useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
+mtfEmaLen     = input.int  (20,   "MTF EMA Period",  minval=5,   maxval=50,            group="Multi-Timeframe")
 
 // ── Sessions ──────────────────────────────────────────────────────────────
 inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
@@ -56,9 +58,37 @@ isDisplacement(offset) =>
     b = math.abs(close[offset] - open[offset])
     r >= atr * 0.8 and b >= r * 0.6
 
-htfEma    = useHTFFilter ? request.security(syminfo.tickerid, "5", ta.ema(close, 50), lookahead=barmerge.lookahead_off) : na
-htfBullOK = not useHTFFilter or (not na(htfEma) and close > htfEma)
-htfBearOK = not useHTFFilter or (not na(htfEma) and close < htfEma)
+// ═══════════════════════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME ANALYSIS (idêntico ao indicador)
+// ═══════════════════════════════════════════════════════════════════════════
+d_ema  = request.security(syminfo.tickerid, "D", ta.ema(close, mtfEmaLen), lookahead=barmerge.lookahead_off)
+d_bull = not na(d_ema) and close > d_ema
+d_bear = not na(d_ema) and close < d_ema
+
+h4_ema  = request.security(syminfo.tickerid, "240", ta.ema(close, mtfEmaLen), lookahead=barmerge.lookahead_off)
+h4_bull = not na(h4_ema) and close > h4_ema
+h4_bear = not na(h4_ema) and close < h4_ema
+
+[h1_ema_v, h1_bfvg, h1_sfvg, h1_bob, h1_sob] = request.security(syminfo.tickerid, "60", [ta.ema(close, mtfEmaLen), low > high[2] or low[1] > high[3] or low[2] > high[4] or low[3] > high[5] or low[4] > high[6], high < low[2] or high[1] < low[3] or high[2] < low[4] or high[3] < low[5] or high[4] < low[6], (close > open and close[1] < open[1]) or (close[1] > open[1] and close[2] < open[2]) or (close[2] > open[2] and close[3] < open[3]), (close < open and close[1] > open[1]) or (close[1] < open[1] and close[2] > open[2]) or (close[2] < open[2] and close[3] > open[3])], lookahead=barmerge.lookahead_off)
+h1_trend_bull = not na(h1_ema_v) and close > h1_ema_v
+h1_trend_bear = not na(h1_ema_v) and close < h1_ema_v
+h1_bull_ok = h1_trend_bull and h1_bfvg and h1_bob
+h1_bear_ok = h1_trend_bear and h1_sfvg and h1_sob
+
+[m15_ema_v, m15_bfvg, m15_sfvg, m15_bob, m15_sob] = request.security(syminfo.tickerid, "15", [ta.ema(close, mtfEmaLen), low > high[2] or low[1] > high[3] or low[2] > high[4] or low[3] > high[5] or low[4] > high[6], high < low[2] or high[1] < low[3] or high[2] < low[4] or high[3] < low[5] or high[4] < low[6], (close > open and close[1] < open[1]) or (close[1] > open[1] and close[2] < open[2]) or (close[2] > open[2] and close[3] < open[3]), (close < open and close[1] > open[1]) or (close[1] < open[1] and close[2] > open[2]) or (close[2] < open[2] and close[3] > open[3])], lookahead=barmerge.lookahead_off)
+m15_trend_bull = not na(m15_ema_v) and close > m15_ema_v
+m15_trend_bear = not na(m15_ema_v) and close < m15_ema_v
+m15_bull_ok = m15_trend_bull and m15_bfvg and m15_bob
+m15_bear_ok = m15_trend_bear and m15_sfvg and m15_sob
+
+[m5_ema_v, m5_bfvg, m5_sfvg, m5_bob, m5_sob] = request.security(syminfo.tickerid, "5", [ta.ema(close, mtfEmaLen), low > high[2] or low[1] > high[3] or low[2] > high[4] or low[3] > high[5] or low[4] > high[6], high < low[2] or high[1] < low[3] or high[2] < low[4] or high[3] < low[5] or high[4] < low[6], (close > open and close[1] < open[1]) or (close[1] > open[1] and close[2] < open[2]) or (close[2] > open[2] and close[3] < open[3]), (close < open and close[1] > open[1]) or (close[1] < open[1] and close[2] > open[2]) or (close[2] < open[2] and close[3] > open[3])], lookahead=barmerge.lookahead_off)
+m5_trend_bull = not na(m5_ema_v) and close > m5_ema_v
+m5_trend_bear = not na(m5_ema_v) and close < m5_ema_v
+m5_bull_ok = m5_trend_bull and m5_bfvg and m5_bob
+m5_bear_ok = m5_trend_bear and m5_sfvg and m5_sob
+
+mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull_ok and m15_bull_ok and m5_bull_ok)
+mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear_ok and m15_bear_ok and m5_bear_ok)
 
 // ── Order Block Detection ─────────────────────────────────────────────────
 isBullishOB(i) =>
@@ -185,7 +215,7 @@ touchesBullFVG = bias == "BULLISH"
                and biasDelay
                and low  <= bullFVG_top
                and low  >= bullFVG_bottom
-               and htfBullOK
+               and mtfBullOK
 
 touchesBearFVG = bias == "BEARISH"
                and bearFVG_active
@@ -194,7 +224,7 @@ touchesBearFVG = bias == "BEARISH"
                and biasDelay
                and high >= bearFVG_bottom
                and high <= bearFVG_top
-               and htfBearOK
+               and mtfBearOK
 
 bullReject = not useFvgReject or close > open
 bearReject = not useFvgReject or close < open
@@ -334,7 +364,7 @@ if barstate.islastconfirmedhistory or barstate.islast
     table.cell(t, 0, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
     table.cell(t, 1, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
     // Filtros ativos
-    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useHTFFilter ? "HTF" : "")
+    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useMTF ? "MTF" : "")
     table.cell(t, 0, 6,  "Filtros:",        text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
     table.cell(t, 1, 6,  _f != "" ? _f : "—", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
     // Separador
