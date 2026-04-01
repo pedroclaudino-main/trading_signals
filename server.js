@@ -5,14 +5,14 @@ const Anthropic = require("@anthropic-ai/sdk");
 // ── Validação de variáveis de ambiente ao arrancar ─────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || "").split(",").map(id => id.trim()).filter(Boolean);
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // shared secret para autenticar webhooks
 
 if (!ANTHROPIC_API_KEY) {
   console.error("FATAL: ANTHROPIC_API_KEY não definida. Servidor não pode arrancar.");
   process.exit(1);
 }
-if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
   console.warn("WARN: TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não definidos — alertas Telegram desativados.");
 }
 
@@ -92,9 +92,9 @@ TAREFA: Valida o setup com base nas regras acima. Podes usar os valores pré-cal
   "no_trade_reason": "string se NO_TRADE, senão null"
 }`;
 
-// ── Telegram sender ────────────────────────────────────────────────────────
+// ── Telegram sender (envia para todos os chat IDs configurados) ────────────
 async function sendTelegram(signal) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
     console.warn("Telegram desativado — credenciais não configuradas.");
     return { ok: false, reason: "telegram_not_configured" };
   }
@@ -118,15 +118,25 @@ async function sendTelegram(signal) {
     `🔍 OB partido: ${signal.broken_ob_direction || "—"}  |  FVG: ${signal.fvg_touched || "—"}\n\n` +
     `💬 ${signal.reason || "Sem razão fornecida"}`;
 
-  const res = await fetch(
-    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg }),
-    }
+  const results = await Promise.allSettled(
+    TELEGRAM_CHAT_IDS.map(async (chatId) => {
+      const res = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: msg }),
+        }
+      );
+      const data = await res.json();
+      if (!data.ok) console.warn(`[TELEGRAM] Falhou para ${chatId}: ${data.description}`);
+      return { chatId, ...data };
+    })
   );
-  return res.json();
+
+  const sent = results.filter(r => r.status === "fulfilled" && r.value.ok).length;
+  console.log(`[TELEGRAM] Enviado para ${sent}/${TELEGRAM_CHAT_IDS.length} utilizadores`);
+  return { ok: sent > 0, sent, total: TELEGRAM_CHAT_IDS.length, details: results.map(r => r.value || r.reason?.message) };
 }
 
 // ── Validação do signal retornado pelo Claude ──────────────────────────────
@@ -247,7 +257,7 @@ app.get("/", (req, res) =>
   res.json({
     status: "online",
     strategy: "ICT 1m — OB break + FVG touch, R/R 1:2",
-    telegram: TELEGRAM_BOT_TOKEN ? "configured" : "not_configured",
+    telegram: TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
   })
 );
