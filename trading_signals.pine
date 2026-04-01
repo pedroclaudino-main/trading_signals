@@ -57,9 +57,10 @@ if bearBreakNow
     bearOB_broken := true
     bias          := "BEARISH"
 
-// FIX #9: Bias reseta no início de cada nova janela de sessão (não em cada barra fora de sessão)
-sessionStarted = inSession and not inSession[1]
-if sessionStarted
+// FIX #9: Bias reseta no FIM de cada sessão (não no início)
+// Reset no início causava race condition: OB break na 1ª barra era imediatamente apagado
+sessionEnded = not inSession and inSession[1]
+if sessionEnded
     bias := "NONE"
 
 // ── FIX #2 + #3 + #6: FVG persistidos com var, bearFVG top/bottom corrigidos ─

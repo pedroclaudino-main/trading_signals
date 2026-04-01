@@ -2,49 +2,34 @@
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Trading_Signals — Backtest
-// Lógica idêntica ao indicador mnq_ict_scalper.pine (todos os 11 fixes aplicados)
+// Lógica de sinais idêntica ao trading_signals.pine (indicador)
 // Usa strategy() para aceder ao Strategy Tester do TradingView
-//
-// INSTRUÇÕES:
-//   1. Aplica ao gráfico MNQH2026 em timeframe de 1 minuto
-//   2. Abre o painel "Strategy Tester" (separador na base do gráfico)
-//   3. Ajusta Capital Inicial, Contratos e Comissão nos Inputs
-//   4. Consulta: Net Profit, Win Rate, Profit Factor, Max Drawdown
 // ─────────────────────────────────────────────────────────────────────────────
 
-strategy(
- title                  = "Trading_Signals — Backtest",
- overlay                = true,
- max_bars_back          = 500,
- initial_capital        = 10000,
- default_qty_type       = strategy.fixed,
- default_qty_value      = 1,
- commission_type        = strategy.commission.cash_per_contract,
- commission_value       = 0.62,   // $ por contrato por lado (ajustável nos Inputs)
- slippage               = 1,      // ticks de slippage (1 tick = 0.25 pts)
- calc_on_every_tick     = false,  // calcula apenas em barras confirmadas (sem warnings)
- pyramiding             = 0)      // sem entradas adicionais enquanto trade aberta
+strategy("Trading_Signals — Backtest", overlay=true, max_bars_back=500,
+ initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=1,
+ commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
+ slippage=1, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=true,
+ margin_long=5, margin_short=5)
 
-// ── Inputs — Estratégia ────────────────────────────────────────────────────
-swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2, maxval=20,  group="Estratégia")
-obStrength    = input.float(1.5, "OB Break Strength (multiplier)",  minval=1.0, maxval=3.0, group="Estratégia")
-maxRiskPts    = input.float(60.0,"Max Risk (pontos)",               minval=10.0,             group="Estratégia")
+// ── Inputs ─────────────────────────────────────────────────────────────────
+swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2,   maxval=20,   group="Estratégia")
+obStrength    = input.float(1.5, "OB Break Strength (multiplier)",  minval=1.0, maxval=3.0,  group="Estratégia")
+maxRiskPts    = input.float(60.0,"Max Risk (points)",               minval=10.0,              group="Estratégia")
+i_contracts   = input.int(1,     "Contratos por trade",             minval=1,   maxval=10,    group="Backtest")
+i_showLabels  = input.bool(true, "Mostrar labels de Entry/TP/SL",                             group="Backtest")
 
-// ── Inputs — Backtest ──────────────────────────────────────────────────────
-i_contracts   = input.int(1,     "Contratos por trade",             minval=1, maxval=10,   group="Backtest")
-i_commission  = input.float(0.62,"Comissão por contrato/lado ($)",  minval=0.0, step=0.01, group="Backtest")
-i_showLabels  = input.bool(true, "Mostrar labels de Entry/TP/SL",                          group="Backtest")
-
-// ── Session windows (Europe/Lisbon) ────────────────────────────────────────
+// ── Session windows (Europe/Lisbon — handles summer/winter auto) ───────────
 inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
 inSession2 = not na(time(timeframe.period, "1545-1615:1234567", "Europe/Lisbon"))
 inSession3 = not na(time(timeframe.period, "1645-1715:1234567", "Europe/Lisbon"))
 inSession  = inSession1 or inSession2 or inSession3
+
 sessionLabel = inSession1 ? "14:45" : inSession2 ? "15:45" : inSession3 ? "16:45" : "N/A"
 
 bgcolor(inSession ? color.new(color.blue, 92) : na, title="Session Window")
 
-// ── Tick rounding (MNQ = 0.25 pts) ─────────────────────────────────────────
+// ── Arredondamento ao tick de 0.25 (tamanho mínimo do MNQ) ─────────────────
 roundTick(x) => math.round(x * 4) / 4
 
 // ── Order Block Detection ──────────────────────────────────────────────────
@@ -80,13 +65,12 @@ if bearBreakNow
     bearOB_broken := true
     bias          := "BEARISH"
 
-// FIX: Bias reseta no FIM de cada sessão (não no início)
-// Reset no início causava race condition: OB break na 1ª barra era imediatamente apagado
+// Bias reseta no FIM de cada sessão (não no início)
 sessionEnded = not inSession and inSession[1]
 if sessionEnded
     bias := "NONE"
 
-// ── Fair Value Gap (persistido, com expiry e bearFVG corrigido) ────────────
+// ── FVG persistidos com var, bearFVG top/bottom corrigidos ─────────────────
 var float bullFVG_top    = na
 var float bullFVG_bottom = na
 var int   bullFVG_bar    = na
@@ -114,8 +98,8 @@ if newBullFVG
                                bgcolor      = color.new(color.green, 88))
 
 if newBearFVG
-    bearFVG_top    := low[2]   // preço mais alto (limite superior)
-    bearFVG_bottom := high[0]  // preço mais baixo (limite inferior)
+    bearFVG_top    := low[2]
+    bearFVG_bottom := high[0]
     bearFVG_bar    := bar_index
     bearFVG_active := true
     box.delete(lastBearBox)
@@ -132,7 +116,7 @@ if bearFVG_active and (bar_index - bearFVG_bar) > 20
     bearFVG_active := false
     box.delete(lastBearBox)
 
-// ── Swing Points para SL ───────────────────────────────────────────────────
+// ── Swing Points for SL ────────────────────────────────────────────────────
 swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
 swingLow  = ta.pivotlow(low,  swingLookback, swingLookback)
 
@@ -146,13 +130,14 @@ if not na(swingLow)
 plotshape(not na(swingHigh), style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   60), size=size.tiny, offset=-swingLookback)
 plotshape(not na(swingLow),  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 60), size=size.tiny, offset=-swingLookback)
 
-// ── Entry: toque no FVG em barra futura, alinhado com bias ────────────────
+// ── Toque no FVG numa barra FUTURA, alinhado com bias ──────────────────────
 touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
                and low <= bullFVG_top and low >= bullFVG_bottom
 
 touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
                and high >= bearFVG_bottom and high <= bearFVG_top
 
+// Invalidar FVG após toque
 if touchesBullFVG
     bullFVG_active := false
 
@@ -162,19 +147,19 @@ if touchesBearFVG
 longSignal  = inSession and touchesBullFVG and not na(lastSwingLow)
 shortSignal = inSession and touchesBearFVG and not na(lastSwingHigh)
 
-// Sem sinal duplo simultâneo
+// Proteger contra sinal duplo simultâneo
 if longSignal and shortSignal
     longSignal  := false
     shortSignal := false
 
-// ── Níveis: Entry = limite do FVG, TP/SL arredondados ao tick de 0.25 ──────
-longEntry = longSignal  ? roundTick(bullFVG_bottom) : na
-longSL    = longSignal  ? roundTick(lastSwingLow)   : na
-longTP    = longSignal  ? roundTick(bullFVG_bottom + (bullFVG_bottom - lastSwingLow) * 2.0) : na
-longRisk  = longSignal  ? bullFVG_bottom - lastSwingLow : na
+// ── Entry = limite do FVG, TP/SL arredondados ao tick de 0.25 ──────────────
+longEntry  = longSignal  ? roundTick(bullFVG_bottom) : na
+longSL     = longSignal  ? roundTick(lastSwingLow)   : na
+longTP     = longSignal  ? roundTick(bullFVG_bottom + (bullFVG_bottom - lastSwingLow) * 2.0) : na
+longRisk   = longSignal  ? bullFVG_bottom - lastSwingLow : na
 
-shortEntry = shortSignal ? roundTick(bearFVG_top)   : na
-shortSL    = shortSignal ? roundTick(lastSwingHigh) : na
+shortEntry = shortSignal ? roundTick(bearFVG_top)    : na
+shortSL    = shortSignal ? roundTick(lastSwingHigh)  : na
 shortTP    = shortSignal ? roundTick(bearFVG_top - (lastSwingHigh - bearFVG_top) * 2.0) : na
 shortRisk  = shortSignal ? lastSwingHigh - bearFVG_top : na
 
@@ -182,50 +167,23 @@ validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
 
 // ── Execução da estratégia ─────────────────────────────────────────────────
-// Os níveis de TP/SL são guardados em var para estarem disponíveis em todas as
-// barras enquanto a posição está aberta — strategy.exit() DEVE ser chamado em
-// cada barra, não apenas na barra de sinal, para o broker simulado funcionar.
-
-var float activeLongTP  = na
-var float activeLongSL  = na
-var float activeShortTP = na
-var float activeShortSL = na
-
 if validLong
-    activeLongTP := longTP
-    activeLongSL := longSL
     strategy.entry("Long", strategy.long, qty=i_contracts,
                    comment="LONG | " + sessionLabel + " | OB+FVG")
+    strategy.exit("Long Exit", "Long", limit=longTP, stop=longSL,
+                   comment_profit="TP ✓", comment_loss="SL ✗")
 
 if validShort
-    activeShortTP := shortTP
-    activeShortSL := shortSL
     strategy.entry("Short", strategy.short, qty=i_contracts,
                    comment="SHORT | " + sessionLabel + " | OB+FVG")
-
-// Exit chamado em CADA BARRA enquanto posição aberta — padrão canónico Pine Script
-if strategy.position_size > 0 and not na(activeLongTP)
-    strategy.exit("Long Exit", from_entry="Long",
-                   limit=activeLongTP, stop=activeLongSL,
+    strategy.exit("Short Exit", "Short", limit=shortTP, stop=shortSL,
                    comment_profit="TP ✓", comment_loss="SL ✗")
 
-if strategy.position_size < 0 and not na(activeShortTP)
-    strategy.exit("Short Exit", from_entry="Short",
-                   limit=activeShortTP, stop=activeShortSL,
-                   comment_profit="TP ✓", comment_loss="SL ✗")
+// Segurança: fechar posições abertas no fim da sessão
+if sessionEnded and strategy.position_size != 0
+    strategy.close_all(comment="Fim Sessão")
 
-// Limpar níveis guardados apenas quando uma posição FECHA (transição de aberta→fechada)
-// NÃO limpar quando position_size==0 genérico, porque na barra de sinal a entry
-// ainda não preencheu e position_size ainda é 0 — o que apagava o TP/SL.
-var float prevPosSize = 0.0
-if strategy.position_size == 0 and prevPosSize != 0
-    activeLongTP  := na
-    activeLongSL  := na
-    activeShortTP := na
-    activeShortSL := na
-prevPosSize := strategy.position_size
-
-// ── Labels de Entry / TP / SL no gráfico (opcional) ───────────────────────
+// ── Labels de Entry / TP / SL no gráfico ───────────────────────────────────
 if validLong and i_showLabels
     label.new(bar_index, low - (high - low) * 0.5,
               text  = "L " + sessionLabel + "\nE "  + str.tostring(longEntry, "#.##")
@@ -248,33 +206,35 @@ if validShort and i_showLabels
               textcolor = color.white,
               size  = size.small)
 
-// ── Plots de diagnóstico ───────────────────────────────────────────────────
+// ── Plot entries ───────────────────────────────────────────────────────────
 plotshape(validLong,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.normal)
 plotshape(validShort, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.normal)
 plotshape(bullBreakNow, title="Bull OB Break", style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,  30), size=size.tiny, text="OB✓")
 plotshape(bearBreakNow, title="Bear OB Break", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange,30), size=size.tiny, text="OB✓")
+bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
-plotchar(inSession,         "In Session", "S", location.top,      color.yellow, size=size.tiny)
-plotchar(bullFVG_active,    "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
-plotchar(bearFVG_active,    "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
-plotchar(bias == "BULLISH", "Bias Bull",  "B", location.abovebar, color.lime,   size=size.tiny)
-plotchar(bias == "BEARISH", "Bias Bear",  "B", location.belowbar, color.orange, size=size.tiny)
+// ── Diagnóstico ────────────────────────────────────────────────────────────
+plotchar(inSession,          "In Session", "S", location.top,      color.yellow, size=size.tiny)
+plotchar(bullFVG_active,     "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
+plotchar(bearFVG_active,     "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
+plotchar(bias == "BULLISH",  "Bias Bull",  "B", location.abovebar, color.lime,   size=size.tiny)
+plotchar(bias == "BEARISH",  "Bias Bear",  "B", location.belowbar, color.orange, size=size.tiny)
 
-// ── Tabela de referência MNQ (canto superior direito) ─────────────────────
-var table infoTable = table.new(position.top_right, 2, 5,
-                                 border_color=color.gray, border_width=1,
-                                 bgcolor=color.new(color.black, 70))
+// ── Tabela de diagnóstico ──────────────────────────────────────────────────
+var int longCount  = 0
+var int shortCount = 0
+if validLong
+    longCount += 1
+if validShort
+    shortCount += 1
 
-// FIX warning barstate.islast: tabela populada na primeira barra (valores estáticos)
-// Não usar barstate.islast em strategies sem calc_on_every_tick
-if barstate.isfirst
-    table.cell(infoTable, 0, 0, "MNQ Backtest",    text_color=color.white,  text_size=size.small, bgcolor=color.new(color.blue, 40))
-    table.cell(infoTable, 1, 0, "Parâmetros",       text_color=color.white,  text_size=size.small, bgcolor=color.new(color.blue, 40))
-    table.cell(infoTable, 0, 1, "Tick",             text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 1, "0.25 pts = $0.50", text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 0, 2, "Ponto",            text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 2, "1 pt = $2.00",     text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 0, 3, "Contratos",        text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, str.tostring(i_contracts),  text_color=color.yellow, text_size=size.tiny)
-    table.cell(infoTable, 0, 4, "Comissão/lado",    text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, "$" + str.tostring(i_commission, "#.##"), text_color=color.yellow, text_size=size.tiny)
+var table t = table.new(position.top_right, 2, 4, border_color=color.gray, border_width=1, bgcolor=color.new(color.black, 70))
+if barstate.islastconfirmedhistory or barstate.islast
+    table.cell(t, 0, 0, "Sinais Long",  text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 0, str.tostring(longCount),  text_color=color.green,  text_size=size.small)
+    table.cell(t, 0, 1, "Sinais Short", text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(shortCount), text_color=color.red,    text_size=size.small)
+    table.cell(t, 0, 2, "Trades",       text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(strategy.closedtrades), text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 3, "Posição",      text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(strategy.position_size), text_color=color.yellow, text_size=size.small)
