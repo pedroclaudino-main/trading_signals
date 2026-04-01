@@ -212,15 +212,16 @@ if longSignal and shortSignal
     shortSignal := false
 
 // ── Entry / SL / TP ───────────────────────────────────────────────────────
-longEntry  = longSignal  ? roundTick(bullFVG_bottom) : na
+// Entry no TOQUE do FVG (borda onde o preço entra na zona), não no fundo
+longEntry  = longSignal  ? roundTick(bullFVG_top)    : na
 longSL     = longSignal  ? roundTick(lastSwingLow)   : na
-longTP     = longSignal  ? roundTick(bullFVG_bottom + (bullFVG_bottom - lastSwingLow) * 2.0) : na
-longRisk   = longSignal  ? bullFVG_bottom - lastSwingLow : na
+longTP     = longSignal  ? roundTick(bullFVG_top + (bullFVG_top - lastSwingLow) * 2.0) : na
+longRisk   = longSignal  ? bullFVG_top - lastSwingLow : na
 
-shortEntry = shortSignal ? roundTick(bearFVG_top)    : na
-shortSL    = shortSignal ? roundTick(lastSwingHigh)  : na
-shortTP    = shortSignal ? roundTick(bearFVG_top - (lastSwingHigh - bearFVG_top) * 2.0) : na
-shortRisk  = shortSignal ? lastSwingHigh - bearFVG_top : na
+shortEntry = shortSignal ? roundTick(bearFVG_bottom)  : na
+shortSL    = shortSignal ? roundTick(lastSwingHigh)   : na
+shortTP    = shortSignal ? roundTick(bearFVG_bottom - (lastSwingHigh - bearFVG_bottom) * 2.0) : na
+shortRisk  = shortSignal ? lastSwingHigh - bearFVG_bottom : na
 
 validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <= maxRiskPts
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
