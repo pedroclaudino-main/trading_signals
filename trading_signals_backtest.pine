@@ -17,7 +17,7 @@ swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2,   
 obStrength    = input.float(1.5, "OB Break Strength (multiplier)",  minval=1.0, maxval=3.0,  group="Estratégia")
 maxRiskPts    = input.float(60.0,"Max Risk (points)",               minval=10.0,              group="Estratégia")
 i_contracts   = input.int(1,     "Contratos por trade",             minval=1,   maxval=10,    group="Backtest")
-i_showLabels  = input.bool(true, "Mostrar labels de Entry/TP/SL",                             group="Backtest")
+
 
 // ── Session windows (Europe/Lisbon — handles summer/winter auto) ───────────
 inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
@@ -127,8 +127,9 @@ if not na(swingHigh)
 if not na(swingLow)
     lastSwingLow  := swingLow
 
-plotshape(not na(swingHigh), style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   60), size=size.tiny, offset=-swingLookback)
-plotshape(not na(swingLow),  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 60), size=size.tiny, offset=-swingLookback)
+// Swing points desenhados com plot (fixos no preço, sem flutuação)
+plot(swingHigh, title="Swing High", style=plot.style_cross, color=color.new(color.red,   40), linewidth=2, offset=-swingLookback)
+plot(swingLow,  title="Swing Low",  style=plot.style_cross, color=color.new(color.green, 40), linewidth=2, offset=-swingLookback)
 
 // ── Toque no FVG numa barra FUTURA, alinhado com bias ──────────────────────
 touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
@@ -183,42 +184,23 @@ if validShort
 if sessionEnded and strategy.position_size != 0
     strategy.close_all(comment="Fim Sessão")
 
-// ── Labels de Entry / TP / SL no gráfico ───────────────────────────────────
-if validLong and i_showLabels
-    label.new(bar_index, low - (high - low) * 0.5,
-              text  = "L " + sessionLabel + "\nE "  + str.tostring(longEntry, "#.##")
-                           + "\nTP " + str.tostring(longTP, "#.##")
-                           + "\nSL " + str.tostring(longSL, "#.##")
-                           + "\nR "  + str.tostring(longRisk, "#.##") + " pts",
-              style = label.style_label_up,
-              color = color.new(color.green, 20),
-              textcolor = color.white,
-              size  = size.small)
-
-if validShort and i_showLabels
-    label.new(bar_index, high + (high - low) * 0.5,
-              text  = "S " + sessionLabel + "\nE "  + str.tostring(shortEntry, "#.##")
-                           + "\nTP " + str.tostring(shortTP, "#.##")
-                           + "\nSL " + str.tostring(shortSL, "#.##")
-                           + "\nR "  + str.tostring(shortRisk, "#.##") + " pts",
-              style = label.style_label_down,
-              color = color.new(color.red, 20),
-              textcolor = color.white,
-              size  = size.small)
-
-// ── Plot entries ───────────────────────────────────────────────────────────
-plotshape(validLong,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.normal)
-plotshape(validShort, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.normal)
-plotshape(bullBreakNow, title="Bull OB Break", style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,  30), size=size.tiny, text="OB✓")
-plotshape(bearBreakNow, title="Bear OB Break", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange,30), size=size.tiny, text="OB✓")
+// ── Plot entries (plot = fixo no preço, nunca flutua) ──────────────────────
+plot(validLong  ? longEntry  : na, title="Long Entry",  style=plot.style_circles, color=color.green,                 linewidth=4)
+plot(validLong  ? longTP     : na, title="Long TP",     style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
+plot(validLong  ? longSL     : na, title="Long SL",     style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
+plot(validShort ? shortEntry : na, title="Short Entry", style=plot.style_circles, color=color.red,                   linewidth=4)
+plot(validShort ? shortTP    : na, title="Short TP",    style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
+plot(validShort ? shortSL    : na, title="Short SL",    style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
+plot(bullBreakNow ? bullOB_high : na, title="Bull OB Break", style=plot.style_circles, color=color.lime,   linewidth=3)
+plot(bearBreakNow ? bearOB_low  : na, title="Bear OB Break", style=plot.style_circles, color=color.orange, linewidth=3)
 bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
-// ── Diagnóstico ────────────────────────────────────────────────────────────
-plotchar(inSession,          "In Session", "S", location.top,      color.yellow, size=size.tiny)
-plotchar(bullFVG_active,     "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
-plotchar(bearFVG_active,     "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
-plotchar(bias == "BULLISH",  "Bias Bull",  "B", location.abovebar, color.lime,   size=size.tiny)
-plotchar(bias == "BEARISH",  "Bias Bear",  "B", location.belowbar, color.orange, size=size.tiny)
+// ── Diagnóstico (visível apenas no Data Window, não polui o gráfico) ──────
+plotchar(inSession,          "In Session", char="", location=location.top,      color=color.yellow, display=display.data_window)
+plotchar(bullFVG_active,     "Bull FVG",   char="", location=location.abovebar, color=color.green,  display=display.data_window)
+plotchar(bearFVG_active,     "Bear FVG",   char="", location=location.belowbar, color=color.red,    display=display.data_window)
+plotchar(bias == "BULLISH",  "Bias Bull",  char="", location=location.abovebar, color=color.lime,   display=display.data_window)
+plotchar(bias == "BEARISH",  "Bias Bear",  char="", location=location.belowbar, color=color.orange, display=display.data_window)
 
 // ── Tabela de diagnóstico ──────────────────────────────────────────────────
 var int longCount  = 0

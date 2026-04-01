@@ -128,8 +128,9 @@ if not na(swingHigh)
 if not na(swingLow)
     lastSwingLow  := swingLow
 
-plotshape(not na(swingHigh), style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   60), size=size.tiny, offset=-swingLookback)
-plotshape(not na(swingLow),  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 60), size=size.tiny, offset=-swingLookback)
+// Swing points desenhados com plot (fixos no preço, sem flutuação)
+plot(swingHigh, title="Swing High", style=plot.style_cross,   color=color.new(color.red,   40), linewidth=2, offset=-swingLookback)
+plot(swingLow,  title="Swing Low",  style=plot.style_cross,   color=color.new(color.green, 40), linewidth=2, offset=-swingLookback)
 
 // ── FIX #2: Toque no FVG numa barra FUTURA (não na mesma barra de deteção) ─
 // A guarda "not newBullFVG" / "not newBearFVG" impede o toque na barra de criação.
@@ -169,18 +170,23 @@ shortRisk  = shortSignal ? lastSwingHigh - bearFVG_top : na
 validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <= maxRiskPts
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
 
-// ── Plot entries ───────────────────────────────────────────────────────────
-plotshape(validLong,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.normal)
-plotshape(validShort, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.normal)
-plotshape(bullBreakNow, title="Bull OB Break", style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,  30), size=size.tiny, text="OB✓")
-plotshape(bearBreakNow, title="Bear OB Break", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange,30), size=size.tiny, text="OB✓")
+// ── Plot entries (plot = fixo no preço, nunca flutua) ──────────────────────
+plot(validLong  ? longEntry  : na, title="Long Entry",  style=plot.style_circles, color=color.green,                 linewidth=4)
+plot(validLong  ? longTP     : na, title="Long TP",     style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
+plot(validLong  ? longSL     : na, title="Long SL",     style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
+plot(validShort ? shortEntry : na, title="Short Entry", style=plot.style_circles, color=color.red,                   linewidth=4)
+plot(validShort ? shortTP    : na, title="Short TP",    style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
+plot(validShort ? shortSL    : na, title="Short SL",    style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
+plot(bullBreakNow ? bullOB_high : na, title="Bull OB Break", style=plot.style_circles, color=color.lime,   linewidth=3)
+plot(bearBreakNow ? bearOB_low  : na, title="Bear OB Break", style=plot.style_circles, color=color.orange, linewidth=3)
+bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
-// ── Diagnóstico (podes remover depois) ────────────────────────────────────
-plotchar(inSession,          "In Session", "S", location.top,      color.yellow, size=size.tiny)
-plotchar(bullFVG_active,     "Bull FVG",   "F", location.abovebar, color.green,  size=size.tiny)
-plotchar(bearFVG_active,     "Bear FVG",   "F", location.belowbar, color.red,    size=size.tiny)
-plotchar(bias == "BULLISH",  "Bias Bull",  "B", location.abovebar, color.lime,   size=size.tiny)
-plotchar(bias == "BEARISH",  "Bias Bear",  "B", location.belowbar, color.orange, size=size.tiny)
+// ── Diagnóstico (visível apenas no Data Window, não polui o gráfico) ──────
+plotchar(inSession,          "In Session", char="", location=location.top,      color=color.yellow, display=display.data_window)
+plotchar(bullFVG_active,     "Bull FVG",   char="", location=location.abovebar, color=color.green,  display=display.data_window)
+plotchar(bearFVG_active,     "Bear FVG",   char="", location=location.belowbar, color=color.red,    display=display.data_window)
+plotchar(bias == "BULLISH",  "Bias Bull",  char="", location=location.abovebar, color=color.lime,   display=display.data_window)
+plotchar(bias == "BEARISH",  "Bias Bear",  char="", location=location.belowbar, color=color.orange, display=display.data_window)
 
 // ── FIX #5 + #10: Webhook payload com campos corretos e proteção contra na ─
 if (validLong or validShort) and barstate.isconfirmed
