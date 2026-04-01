@@ -56,9 +56,7 @@ isDisplacement(offset) =>
     b = math.abs(close[offset] - open[offset])
     r >= atr * 0.8 and b >= r * 0.6
 
-htfEma    = useHTFFilter
-    ? request.security(syminfo.tickerid, "5", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
-    : na
+htfEma    = useHTFFilter ? request.security(syminfo.tickerid, "5", ta.ema(close, 50), lookahead=barmerge.lookahead_off) : na
 htfBullOK = not useHTFFilter or (not na(htfEma) and close > htfEma)
 htfBearOK = not useHTFFilter or (not na(htfEma) and close < htfEma)
 
