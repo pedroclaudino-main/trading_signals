@@ -2,9 +2,8 @@
 indicator("Trading Signals", overlay=true, max_bars_back=500)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-var string WEBHOOK_URL = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
-var string BOT_TOKEN   = input.string("", "Telegram Bot Token")
-var string CHAT_ID     = input.string("", "Telegram Chat ID")
+var string WEBHOOK_URL    = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
+var string WEBHOOK_SECRET = input.string("", "Webhook Secret (autenticação)")
 
 swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2,   maxval=20)
 obStrength    = input.float(1.5, "OB Break Strength (multiplier)",  minval=1.0, maxval=3.0)
@@ -200,8 +199,7 @@ if (validLong or validShort) and barstate.isconfirmed
     swingLowStr  = not na(lastSwingLow)  ? str.tostring(lastSwingLow,  "#.##") : "null"
     swingHighStr = not na(lastSwingHigh) ? str.tostring(lastSwingHigh, "#.##") : "null"
 
-    payload  = '{"bot_token":"'    + BOT_TOKEN    + '",'
-    payload += '"chat_id":"'       + CHAT_ID      + '",'
+    payload  = '{"webhook_secret":"' + WEBHOOK_SECRET + '",'
     payload += '"session":"'       + sessionLabel + '",'
     payload += '"current_price":'  + str.tostring(close, "#.##") + ','
     // FIX #5: campo renomeado de "candles" para "candles_1m"
