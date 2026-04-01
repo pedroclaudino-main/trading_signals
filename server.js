@@ -193,7 +193,6 @@ async function sendTelegram(signal) {
   const msg =
     `${emoji} TRADE ALERT — MNQ\n` +
     `━━━━━━━━━━━━━━━━━\n` +
-    `📌 CME_MINI:MNQ\n` +
     `Direção: ${dir}\n` +
     `Confiança: ${conf}\n\n` +
     `🎯 Entry:  ${typeof signal.entry  === "number" ? signal.entry.toFixed(2)  : "—"}\n` +
