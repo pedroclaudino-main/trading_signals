@@ -1,40 +1,81 @@
 //@version=6
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trading_Signals — Backtest
-// Lógica de sinais idêntica ao trading_signals.pine (indicador)
-// Usa strategy() para aceder ao Strategy Tester do TradingView
+// Trading_Signals v2 — Backtest
+// Lógica de sinais idêntica ao trading_signals.pine (indicador) — 1:1
+//
+// Correções v2:
+//  - Removido calc_on_every_tick=true (conflituante com process_orders_on_close)
+//  - Adicionado close_entries_rule=rules.first_in_first_out
+//  - Mesmos filtros do indicador (biasBar, fvgPostBias, displacement, reject)
+//  - Tabela de stats expandida
 // ─────────────────────────────────────────────────────────────────────────────
 
-strategy("Trading_Signals — Backtest", overlay=true, max_bars_back=500,
- initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=1,
- commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
- slippage=1, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=true,
- margin_long=5, margin_short=5, max_labels_count=200)
+strategy("Trading_Signals v2 — Backtest", overlay=true, max_bars_back=500,
+         initial_capital      = 100000,
+         default_qty_type     = strategy.fixed,
+         default_qty_value    = 1,
+         commission_type      = strategy.commission.cash_per_contract,
+         commission_value     = 0.62,
+         slippage             = 1,
+         pyramiding           = 0,
+         process_orders_on_close = true,
+         close_entries_rule   = "FIFO",
+         margin_long          = 5,
+         margin_short         = 5,
+         max_labels_count     = 200)
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-swingLookback = input.int(5,     "Swing Lookback (bars)",           minval=2,   maxval=20,   group="Estratégia")
-obStrength    = input.float(1.5, "OB Break Strength (multiplier)",  minval=1.0, maxval=3.0,  group="Estratégia")
-maxRiskPts    = input.float(60.0,"Max Risk (points)",               minval=10.0,              group="Estratégia")
-i_contracts   = input.int(1,     "Contratos por trade",             minval=1,   maxval=10,    group="Backtest")
+swingLookback = input.int  (5,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
+obStrength    = input.float(1.5,  "OB Strength (multiplier)", minval=1.0, maxval=3.0, group="Estratégia")
+maxRiskPts    = input.float(60.0, "Max Risk (pontos)",         minval=10.0,            group="Estratégia")
+i_contracts   = input.int  (1,    "Contratos por trade",       minval=1,   maxval=10,  group="Backtest")
 
+atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxval=50,  group="Filtros")
+minFvgMult    = input.float(0.05, "FVG Min Size (× ATR)",      minval=0.01,maxval=1.0, group="Filtros")
+useDispFilter = input.bool (true, "Filtro: Deslocamento OB",                           group="Filtros")
+useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                           group="Filtros")
+useHTFFilter  = input.bool (false,"Filtro: HTF 5m EMA50",                              group="Filtros")
 
-// ── Session windows (Europe/Lisbon — handles summer/winter auto) ───────────
+// ── Sessions ──────────────────────────────────────────────────────────────
 inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
 inSession2 = not na(time(timeframe.period, "1545-1615:1234567", "Europe/Lisbon"))
 inSession3 = not na(time(timeframe.period, "1645-1715:1234567", "Europe/Lisbon"))
-inSession  = inSession1 or inSession2 or inSession3
-
+inSession   = inSession1 or inSession2 or inSession3
 sessionLabel = inSession1 ? "14:45" : inSession2 ? "15:45" : inSession3 ? "16:45" : "N/A"
 
 bgcolor(inSession ? color.new(color.blue, 92) : na, title="Session Window")
 
-// ── Arredondamento ao tick de 0.25 (tamanho mínimo do MNQ) ─────────────────
+// ── Utilities ─────────────────────────────────────────────────────────────
 roundTick(x) => math.round(x * 4) / 4
 
-// ── Order Block Detection ──────────────────────────────────────────────────
-isBullishOB(i) => close[i] < open[i] and close[i-1] > open[i-1] and (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
-isBearishOB(i) => close[i] > open[i] and close[i-1] < open[i-1] and (open[i-1] - close[i-1]) > (high[i] - low[i]) * obStrength
+atr = ta.atr(atrLen)
+
+isDisplacement(offset) =>
+    r = high[offset] - low[offset]
+    b = math.abs(close[offset] - open[offset])
+    r >= atr * 0.8 and b >= r * 0.6
+
+htfEma    = useHTFFilter
+    ? request.security(syminfo.tickerid, "5", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+    : na
+htfBullOK = not useHTFFilter or (not na(htfEma) and close > htfEma)
+htfBearOK = not useHTFFilter or (not na(htfEma) and close < htfEma)
+
+// ── Order Block Detection ─────────────────────────────────────────────────
+isBullishOB(i) =>
+    bearish     = close[i]   < open[i]
+    bullishNext = close[i-1] > open[i-1]
+    momentum    = (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
+    hasDisp     = useDispFilter ? isDisplacement(i-1) : true
+    bearish and bullishNext and momentum and hasDisp
+
+isBearishOB(i) =>
+    bullish     = close[i]   > open[i]
+    bearishNext = close[i-1] < open[i-1]
+    momentum    = (open[i-1] - close[i-1]) > (high[i] - low[i]) * obStrength
+    hasDisp     = useDispFilter ? isDisplacement(i-1) : true
+    bullish and bearishNext and momentum and hasDisp
 
 var float  bullOB_high   = na
 var float  bullOB_low    = na
@@ -43,6 +84,7 @@ var float  bearOB_low    = na
 var bool   bullOB_broken = false
 var bool   bearOB_broken = false
 var string bias          = "NONE"
+var int    biasBar       = -999
 
 if isBullishOB(1)
     bullOB_high   := high[1]
@@ -60,17 +102,21 @@ bearBreakNow = not bearOB_broken and not na(bearOB_low)  and close < bearOB_low
 if bullBreakNow
     bullOB_broken := true
     bias          := "BULLISH"
+    biasBar       := bar_index
 
 if bearBreakNow
     bearOB_broken := true
     bias          := "BEARISH"
+    biasBar       := bar_index
 
-// Bias reseta no FIM de cada sessão (não no início)
 sessionEnded = not inSession and inSession[1]
 if sessionEnded
-    bias := "NONE"
+    bias    := "NONE"
+    biasBar := -999
 
-// ── FVG persistidos com var, bearFVG top/bottom corrigidos ─────────────────
+// ── FVG Detection ─────────────────────────────────────────────────────────
+fvgMinSize = atr * minFvgMult
+
 var float bullFVG_top    = na
 var float bullFVG_bottom = na
 var int   bullFVG_bar    = na
@@ -84,8 +130,8 @@ var bool  bearFVG_active = false
 var box lastBullBox = na
 var box lastBearBox = na
 
-newBullFVG = low[0] > high[2]
-newBearFVG = high[0] < low[2]
+newBullFVG = low[0] > high[2] and (low[0] - high[2]) >= fvgMinSize
+newBearFVG = high[0] < low[2] and (low[2] - high[0]) >= fvgMinSize
 
 if newBullFVG
     bullFVG_top    := low[0]
@@ -94,8 +140,8 @@ if newBullFVG
     bullFVG_active := true
     box.delete(lastBullBox)
     lastBullBox    := box.new(bar_index - 2, bullFVG_top, bar_index + 20, bullFVG_bottom,
-                               border_color = color.new(color.green, 50),
-                               bgcolor      = color.new(color.green, 88))
+                               border_color=color.new(color.green, 50),
+                               bgcolor     =color.new(color.green, 88))
 
 if newBearFVG
     bearFVG_top    := low[2]
@@ -104,10 +150,9 @@ if newBearFVG
     bearFVG_active := true
     box.delete(lastBearBox)
     lastBearBox    := box.new(bar_index - 2, bearFVG_top, bar_index + 20, bearFVG_bottom,
-                               border_color = color.new(color.red, 50),
-                               bgcolor      = color.new(color.red, 88))
+                               border_color=color.new(color.red, 50),
+                               bgcolor     =color.new(color.red, 88))
 
-// FVG expira após 20 barras sem toque
 if bullFVG_active and (bar_index - bullFVG_bar) > 20
     bullFVG_active := false
     box.delete(lastBullBox)
@@ -116,9 +161,9 @@ if bearFVG_active and (bar_index - bearFVG_bar) > 20
     bearFVG_active := false
     box.delete(lastBearBox)
 
-// ── Swing Points for SL ────────────────────────────────────────────────────
+// ── Swing Points ──────────────────────────────────────────────────────────
 swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
-swingLow  = ta.pivotlow(low,  swingLookback, swingLookback)
+swingLow  = ta.pivotlow (low,  swingLookback, swingLookback)
 
 var float lastSwingHigh = na
 var float lastSwingLow  = na
@@ -127,33 +172,48 @@ if not na(swingHigh)
 if not na(swingLow)
     lastSwingLow  := swingLow
 
-// Swing points desenhados com plot (fixos no preço, sem flutuação)
-plot(swingHigh, title="Swing High", style=plot.style_cross, color=color.new(color.red,   40), linewidth=2, offset=-swingLookback)
-plot(swingLow,  title="Swing Low",  style=plot.style_cross, color=color.new(color.green, 40), linewidth=2, offset=-swingLookback)
+plot(swingHigh, "Swing High", color.new(color.red,   40), 2, plot.style_cross, offset=-swingLookback)
+plot(swingLow,  "Swing Low",  color.new(color.green, 40), 2, plot.style_cross, offset=-swingLookback)
 
-// ── Toque no FVG numa barra FUTURA, alinhado com bias ──────────────────────
-touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
-               and low <= bullFVG_top and low >= bullFVG_bottom
+// ── FVG Touch (idêntico ao indicador) ─────────────────────────────────────
+bullFvgPostBias = not na(bullFVG_bar) and bullFVG_bar > biasBar
+bearFvgPostBias = not na(bearFVG_bar) and bearFVG_bar > biasBar
+biasDelay       = bar_index > biasBar
 
-touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
-               and high >= bearFVG_bottom and high <= bearFVG_top
+touchesBullFVG = bias == "BULLISH"
+               and bullFVG_active
+               and not newBullFVG
+               and bullFvgPostBias
+               and biasDelay
+               and low  <= bullFVG_top
+               and low  >= bullFVG_bottom
+               and htfBullOK
 
-// Invalidar FVG após toque
+touchesBearFVG = bias == "BEARISH"
+               and bearFVG_active
+               and not newBearFVG
+               and bearFvgPostBias
+               and biasDelay
+               and high >= bearFVG_bottom
+               and high <= bearFVG_top
+               and htfBearOK
+
+bullReject = not useFvgReject or close > open
+bearReject = not useFvgReject or close < open
+
 if touchesBullFVG
     bullFVG_active := false
-
 if touchesBearFVG
     bearFVG_active := false
 
-longSignal  = inSession and touchesBullFVG and not na(lastSwingLow)
-shortSignal = inSession and touchesBearFVG and not na(lastSwingHigh)
+longSignal  = inSession and touchesBullFVG and bullReject and not na(lastSwingLow)
+shortSignal = inSession and touchesBearFVG and bearReject and not na(lastSwingHigh)
 
-// Proteger contra sinal duplo simultâneo
 if longSignal and shortSignal
     longSignal  := false
     shortSignal := false
 
-// ── Entry = limite do FVG, TP/SL arredondados ao tick de 0.25 ──────────────
+// ── Entry / SL / TP ───────────────────────────────────────────────────────
 longEntry  = longSignal  ? roundTick(bullFVG_bottom) : na
 longSL     = longSignal  ? roundTick(lastSwingLow)   : na
 longTP     = longSignal  ? roundTick(bullFVG_bottom + (bullFVG_bottom - lastSwingLow) * 2.0) : na
@@ -167,86 +227,137 @@ shortRisk  = shortSignal ? lastSwingHigh - bearFVG_top : na
 validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <= maxRiskPts
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
 
-// ── Execução da estratégia ─────────────────────────────────────────────────
+// ── Execução ──────────────────────────────────────────────────────────────
 if validLong
-    strategy.entry("Long", strategy.long, qty=i_contracts,
+    strategy.entry("Long",  strategy.long,  qty=i_contracts,
                    comment="LONG | " + sessionLabel + " | OB+FVG")
-    strategy.exit("Long Exit", "Long", limit=longTP, stop=longSL,
+    strategy.exit ("Long Exit",  "Long",
+                   limit=longTP,  stop=longSL,
                    comment_profit="TP ✓", comment_loss="SL ✗")
 
 if validShort
     strategy.entry("Short", strategy.short, qty=i_contracts,
                    comment="SHORT | " + sessionLabel + " | OB+FVG")
-    strategy.exit("Short Exit", "Short", limit=shortTP, stop=shortSL,
+    strategy.exit ("Short Exit", "Short",
+                   limit=shortTP, stop=shortSL,
                    comment_profit="TP ✓", comment_loss="SL ✗")
 
-// Segurança: fechar posições abertas no fim da sessão
+// Fechar posições abertas no fim da sessão
 if sessionEnded and strategy.position_size != 0
     strategy.close_all(comment="Fim Sessão")
 
-// ── Marcadores fixos no preço (plot) + labels com texto (sinais raros) ─────
-plot(validLong  ? longEntry  : na, title="Long Entry",  style=plot.style_circles, color=color.green,                 linewidth=4)
-plot(validLong  ? longTP     : na, title="Long TP",     style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
-plot(validLong  ? longSL     : na, title="Long SL",     style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
-plot(validShort ? shortEntry : na, title="Short Entry", style=plot.style_circles, color=color.red,                   linewidth=4)
-plot(validShort ? shortTP    : na, title="Short TP",    style=plot.style_cross,   color=color.new(color.red, 40),    linewidth=2)
-plot(validShort ? shortSL    : na, title="Short SL",    style=plot.style_cross,   color=color.new(color.green, 40),  linewidth=2)
-plot(bullBreakNow ? bullOB_high : na, title="Bull OB Break", style=plot.style_circles, color=color.lime,   linewidth=3)
-plot(bearBreakNow ? bearOB_low  : na, title="Bear OB Break", style=plot.style_circles, color=color.orange, linewidth=3)
+// ── Plots ─────────────────────────────────────────────────────────────────
+plot(validLong  ? longEntry  : na, "Long Entry",  color.green,                linewidth=4, style=plot.style_circles)
+plot(validLong  ? longTP     : na, "Long TP",     color.new(color.green, 40), linewidth=2, style=plot.style_cross)
+plot(validLong  ? longSL     : na, "Long SL",     color.new(color.red,   40), linewidth=2, style=plot.style_cross)
+plot(validShort ? shortEntry : na, "Short Entry", color.red,                  linewidth=4, style=plot.style_circles)
+plot(validShort ? shortTP    : na, "Short TP",    color.new(color.red,   40), linewidth=2, style=plot.style_cross)
+plot(validShort ? shortSL    : na, "Short SL",    color.new(color.green, 40), linewidth=2, style=plot.style_cross)
+plot(bullBreakNow ? bullOB_high : na, "Bull OB Break", color.lime,   linewidth=3, style=plot.style_circles)
+plot(bearBreakNow ? bearOB_low  : na, "Bear OB Break", color.orange, linewidth=3, style=plot.style_circles)
+
 bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
-// Labels de texto — apenas nos sinais (raros, não poluem)
 if validLong
-    label.new(bar_index, longEntry, text="▲ LONG\nE " + str.tostring(longEntry, "#.##") + "\nTP " + str.tostring(longTP, "#.##") + "\nSL " + str.tostring(longSL, "#.##"),
-              style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+    label.new(bar_index, longEntry,
+              text ="▲ LONG\nE "  + str.tostring(longEntry,  "#.##") +
+                    "\nTP " + str.tostring(longTP,  "#.##") +
+                    "\nSL " + str.tostring(longSL,  "#.##"),
+              style=label.style_label_up,   color=color.new(color.green, 20),
+              textcolor=color.white, size=size.small)
 if validShort
-    label.new(bar_index, shortEntry, text="▼ SHORT\nE " + str.tostring(shortEntry, "#.##") + "\nTP " + str.tostring(shortTP, "#.##") + "\nSL " + str.tostring(shortSL, "#.##"),
-              style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+    label.new(bar_index, shortEntry,
+              text ="▼ SHORT\nE " + str.tostring(shortEntry, "#.##") +
+                    "\nTP " + str.tostring(shortTP, "#.##") +
+                    "\nSL " + str.tostring(shortSL, "#.##"),
+              style=label.style_label_down, color=color.new(color.red, 20),
+              textcolor=color.white, size=size.small)
 if bullBreakNow
-    label.new(bar_index, bullOB_high, text="OB✓", style=label.style_label_up, color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, bullOB_high, text="OB✓",
+              style=label.style_label_up,   color=color.new(color.lime,   30),
+              textcolor=color.white, size=size.tiny)
 if bearBreakNow
-    label.new(bar_index, bearOB_low, text="OB✓", style=label.style_label_down, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, bearOB_low,  text="OB✓",
+              style=label.style_label_down, color=color.new(color.orange, 30),
+              textcolor=color.white, size=size.tiny)
 
-// ── Diagnóstico (visível apenas no Data Window) ───────────────────────────
-plotchar(inSession,          "In Session", char="", location=location.top,      color=color.yellow, display=display.data_window)
-plotchar(bullFVG_active,     "Bull FVG",   char="", location=location.abovebar, color=color.green,  display=display.data_window)
-plotchar(bearFVG_active,     "Bear FVG",   char="", location=location.belowbar, color=color.red,    display=display.data_window)
-plotchar(bias == "BULLISH",  "Bias Bull",  char="", location=location.abovebar, color=color.lime,   display=display.data_window)
-plotchar(bias == "BEARISH",  "Bias Bear",  char="", location=location.belowbar, color=color.orange, display=display.data_window)
+// ── Data Window ───────────────────────────────────────────────────────────
+plotchar(inSession,          "In Session", "", location.top,      color.yellow, display=display.data_window)
+plotchar(bullFVG_active,     "Bull FVG",   "", location.abovebar, color.green,  display=display.data_window)
+plotchar(bearFVG_active,     "Bear FVG",   "", location.belowbar, color.red,    display=display.data_window)
+plotchar(bias == "BULLISH",  "Bias Bull",  "", location.abovebar, color.lime,   display=display.data_window)
+plotchar(bias == "BEARISH",  "Bias Bear",  "", location.belowbar, color.orange, display=display.data_window)
 
-// ── Tabela: legenda + diagnóstico (canto superior direito) ─────────────────
+// ── Tabela: legenda + diagnóstico + stats ─────────────────────────────────
 var int longCount  = 0
 var int shortCount = 0
+var int longWins   = 0
+var int shortWins  = 0
+
 if validLong
-    longCount += 1
+    longCount  += 1
 if validShort
     shortCount += 1
 
-var table t = table.new(position.top_right, 2, 12, border_color=color.new(color.gray, 60), border_width=1, bgcolor=color.new(color.black, 80))
+// Contar wins a partir dos trades fechados
+if strategy.closedtrades > 0
+    lastResult = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    lastDir    = strategy.closedtrades.entry_comment(strategy.closedtrades - 1)
+    if lastResult > 0
+        if str.startswith(lastDir, "LONG")
+            longWins += 1
+        else
+            shortWins += 1
+
+totalTrades = strategy.closedtrades
+totalWins   = strategy.wintrades
+totalPct    = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0.0
+netProfit   = strategy.netprofit
+
+var table t = table.new(position.top_right, 2, 16,
+                         border_color=color.new(color.gray, 60),
+                         border_width =1,
+                         bgcolor      =color.new(color.black, 80))
+
 if barstate.islastconfirmedhistory or barstate.islast
     // Legenda
-    table.cell(t, 0, 0, "LEGENDA",          text_color=color.white,  text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 1, 0, "",                  text_size=size.small)
-    table.cell(t, 0, 1, "● Verde",           text_color=color.green,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 1, "Long Entry",        text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 2, "● Vermelho",        text_color=color.red,    text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 2, "Short Entry",       text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 3, "✕ Verde/Verm",      text_color=color.green,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 3, "TP / SL",           text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 4, "✕ Verm/Verde",      text_color=color.red,    text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 4, "Swing High / Low",  text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 5, "● Lima",            text_color=color.lime,   text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 5, "Bull OB Break",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 6, "● Laranja",         text_color=color.orange, text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 6, "Bear OB Break",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 7, "█ Azul",            text_color=color.blue,   text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 7, "Sessão ativa",      text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    // Diagnóstico
-    table.cell(t, 0, 8, "───────",           text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 8, "───────",           text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 0, 9,  "Sinais Long",      text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 9,  str.tostring(longCount),           text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 10, "Sinais Short",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 10, str.tostring(shortCount),          text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 11, "Trades",           text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
-    table.cell(t, 1, 11, str.tostring(strategy.closedtrades), text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 0,  "LEGENDA",         text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 0,  "",                text_size=size.small)
+    table.cell(t, 0, 1,  "● Verde",         text_color=color.green,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 1,  "Long Entry",      text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 2,  "● Vermelho",      text_color=color.red,    text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 2,  "Short Entry",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 3,  "● Lima",          text_color=color.lime,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 3,  "Bull OB Break",   text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 0, 4,  "● Laranja",       text_color=color.orange, text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 4,  "Bear OB Break",   text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    // Separador
+    table.cell(t, 0, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
+    table.cell(t, 1, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
+    // Filtros ativos
+    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useHTFFilter ? "HTF" : "")
+    table.cell(t, 0, 6,  "Filtros:",        text_color=color.gray,   text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 6,  _f != "" ? _f : "—", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
+    // Separador
+    table.cell(t, 0, 7,  "───────",         text_color=color.gray,   text_size=size.tiny)
+    table.cell(t, 1, 7,  "───────",         text_color=color.gray,   text_size=size.tiny)
+    // Stats
+    table.cell(t, 0, 8,  "ESTATÍSTICAS",    text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 8,  "",               text_size=size.small)
+    table.cell(t, 0, 9,  "Sinais Long",     text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 9,  str.tostring(longCount),  text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 10, "Sinais Short",    text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 10, str.tostring(shortCount), text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 11, "Trades Fechados", text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 11, str.tostring(totalTrades),text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 12, "Win Rate",        text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    _wrColor = totalPct >= 40 ? color.green : color.red
+    table.cell(t, 1, 12, str.tostring(totalPct, "#.#") + "%", text_color=_wrColor, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 13, "Wins / Losses",   text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 13, str.tostring(totalWins) + " / " + str.tostring(strategy.losstrades),
+               text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 14, "Lucro Líquido",   text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    _pnlColor = netProfit >= 0 ? color.green : color.red
+    table.cell(t, 1, 14, "$" + str.tostring(netProfit, "#.##"), text_color=_pnlColor, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(t, 0, 15, "Drawdown Máx",    text_color=color.white,  text_size=size.tiny,  text_halign=text.align_left)
+    table.cell(t, 1, 15, str.tostring(strategy.max_drawdown, "#.##"), text_color=color.orange, text_size=size.tiny, text_halign=text.align_left)
