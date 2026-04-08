@@ -1,74 +1,88 @@
-# MNQ ICT Scalper — Setup Guide
+# MNQ ICT Scalper v3 — Setup Guide
 
-Sistema completo de alertas ICT para CME_MINI:MNQH2026 com análise por Claude AI.
+Sistema completo de alertas ICT para CME_MINI:MNQ com análise contextual por Claude AI.
+
+---
+
+## O que mudou na v3
+
+### Pine Script (trading_signals.pine / backtest)
+- **MTF corrigido**: trend agora usa close do timeframe correto (não close 1m)
+- **MTF OB com momentum**: OBs nos HTFs verificam força da vela (não apenas cor)
+- **MTF FVG limitado**: apenas 3 barras lookback (não 5+)
+- **Filtro de volume**: OB break e FVG touch exigem volume > SMA20 × 1.2
+- **Rejeição forte**: close deve SAIR do FVG (não apenas fechar bullish/bearish)
+- **Historial de 2 OBs**: guarda primary + secondary (não perde OBs relevantes)
+- **Limite por sessão**: max 1 sinal por janela (configurável)
+- **FVG min absoluto**: 2 pontos mínimo além do filtro × ATR
+- **Swing lookback**: default 3 (mais reativo para scalping)
+- **Payload com MTF**: envia estado de cada TF ao servidor
+- **Payload com volume**: cada candle inclui volume
+
+### Backtest
+- **process_orders_on_close=false**: fills mais realistas
+- **Win counting corrigido**: deteta novos trades fechados corretamente
+- **Max trades diários**: controlo de risco intraday (default: 3)
+- **Profit Factor**: nova métrica na tabela de stats
+
+### Server (server.js)
+- **Claude com novo papel**: análise contextual (não re-validação redundante)
+- **Recebe dados MTF**: pode verificar alinhamento real
+- **Retry com backoff**: 2 retries na API do Claude
+- **Telegram com timeout**: 10s timeout em cada envio
+- **Validação melhorada**: verifica TP, R:R, proximidade ao preço, risk max
+- **Journal automático**: cada signal gravado em trade_journal.jsonl
+- **NO_TRADE notifications**: opção para receber alertas de rejeição
+- **Endpoint /journal**: consultar histórico via HTTP
 
 ---
 
 ## Arquitetura
 
-TradingView (Pine Script) → Webhook Server (Railway) → Claude AI → Telegram (iPhone)
+TradingView (Pine Script v3) → Webhook Server (Railway) → Claude AI (contexto) → Telegram (iPhone)
 
 ---
 
 ## PASSO 1 — Deploy no Railway.app
 
-1. Cria conta em https://railway.app (gratuito)
-2. Clica "New Project" → "Deploy from GitHub"
-   - Faz upload desta pasta como repositório GitHub, OU
-   - Usa "Deploy from local" com o Railway CLI
-3. Adiciona a variável de ambiente:
-   - Nome: `ANTHROPIC_API_KEY`
-   - Valor: a tua API key de https://console.anthropic.com
-4. Railway dá-te uma URL pública tipo: `https://mnq-trader-production.up.railway.app`
-5. Copia essa URL — vais precisar no Pine Script
-
-### Alternativa rápida com Railway CLI:
-```bash
-npm install -g @railway/cli
-railway login
-railway init
-railway up
-railway variables set ANTHROPIC_API_KEY=sk-ant-...
-```
+1. Cria conta em https://railway.app
+2. "New Project" → "Deploy from GitHub"
+3. Variáveis de ambiente:
+   - `ANTHROPIC_API_KEY` — obrigatório
+   - `TELEGRAM_BOT_TOKEN` — obrigatório
+   - `TELEGRAM_CHAT_ID` — obrigatório (pode ser múltiplos: `id1,id2`)
+   - `WEBHOOK_SECRET` — recomendado
+   - `NOTIFY_NO_TRADE` — `true` para debug, `false` em produção
+4. Railway dá URL pública: `https://xxx.up.railway.app`
 
 ---
 
 ## PASSO 2 — Telegram Bot
 
-1. Abre Telegram → procura @BotFather
-2. Envia `/newbot` → segue instruções → copia o **Bot Token**
-3. Procura @userinfobot → envia qualquer mensagem → copia o **Chat ID**
-4. Procura o teu novo bot → clica **Start**
+1. @BotFather → `/newbot` → copia Bot Token
+2. @userinfobot → copia Chat ID
+3. Abre o bot → Start
 
 ---
 
 ## PASSO 3 — Pine Script no TradingView
 
-1. Abre TradingView → Chart do MNQ (CME_MINI:MNQH2026)
-2. Pine Editor → cola o conteúdo de `mnq_ict_scalper.pine`
-3. Edita as 3 primeiras linhas:
-   ```
-   WEBHOOK_URL = "https://SEU-PROJETO.railway.app/webhook"
-   BOT_TOKEN   = "1234567890:ABCdef..."
-   CHAT_ID     = "123456789"
-   ```
-4. Clica "Add to chart"
-5. Cria um Alert:
-   - Condition: "MNQ ICT Scalper — Webhook Alerts"
-   - Alert actions: ✅ Webhook URL → cola a tua URL do Railway + `/webhook`
-   - Expiration: Open-ended
-   - Message: deixa vazio (o Pine Script gera o payload automaticamente)
+1. Chart do MNQ → Pine Editor → cola `trading_signals.pine`
+2. Edita WEBHOOK_URL e WEBHOOK_SECRET
+3. Add to chart (timeframe 1 minuto)
+4. Cria Alert → Webhook URL → expiration open-ended
 
 ---
 
-## PASSO 4 — Timeframes recomendados
+## PASSO 4 — Verificar journal
 
-Usa o script em **1 minuto** para entradas e define o alerta nesse timeframe.
-O script deteta OBs e FVGs no 1m e 5m automaticamente.
+```bash
+# Últimos 20 sinais
+curl https://SEU-PROJETO.railway.app/journal?limit=20
 
-Para a análise top-down (1D, 4H, 1H, 15m), o Claude AI recebe os dados do 1m
-e aplica o bias que tens configurado manualmente — podes adicionar inputs extras
-ao Pine Script para enviar também os closes dos HTFs se quiseres mais precisão.
+# Health check
+curl https://SEU-PROJETO.railway.app/
+```
 
 ---
 
@@ -80,54 +94,29 @@ ao Pine Script para enviar também os closes dos HTFs se quiseres mais precisão
 | 2      | 15:45 – 16:15 | 10:45 – 11:15  |
 | 3      | 16:45 – 17:15 | 11:45 – 12:15  |
 
-**Atenção:** Em horário de verão (WEST = UTC+1) as janelas no TradingView
-já estão em UTC, por isso o Pine Script usa hora de Lisboa diretamente.
-
----
-
-## Estrutura da mensagem recebida no iPhone
-
-```
-🟢 TRADE ALERT — MNQ
-━━━━━━━━━━━━━━━━━
-📌 CME_MINI:MNQH2026
-Direção: ▲ LONG
-Confiança: 🔥 Alta
-
-🎯 Entry:  19850.25
-✅ TP1:    19920.00
-✅ TP2:    19975.00
-❌ SL:     19790.00
-
-📊 R/R: 1 : 2.33
-📈 Bias 1D: BULLISH | 4H: BULLISH
-
-💬 Preço fechou em OB bullish com FVG acima como alvo
-```
-
 ---
 
 ## Testar manualmente
-
-Podes testar o servidor sem o TradingView com este comando:
 
 ```bash
 curl -X POST https://SEU-PROJETO.railway.app/webhook \
   -H "Content-Type: application/json" \
   -d '{
-    "bot_token": "SEU_BOT_TOKEN",
-    "chat_id": "SEU_CHAT_ID",
+    "webhook_secret": "SEU_SECRET",
     "session": "15:45",
     "current_price": 19850.25,
-    "candles": [
-      {"tf":"1m","o":19840,"h":19860,"l":19835,"c":19852},
-      {"tf":"prev","o":19860,"h":19875,"l":19838,"c":19841}
+    "candles_1m": [
+      {"o":19840,"h":19860,"l":19835,"c":19852,"v":1250},
+      {"o":19860,"h":19875,"l":19838,"c":19841,"v":980},
+      {"o":19835,"h":19845,"l":19830,"c":19840,"v":1100}
     ],
-    "order_blocks": [
-      {"tf":"1m","type":"bullish","high":19855,"low":19838}
-    ],
-    "fvgs": [
-      {"tf":"1m","type":"bullish","top":19910,"bottom":19895}
-    ]
+    "broken_ob": {"type":"bullish","high":19855,"low":19838},
+    "fvgs": [{"type":"bullish","top":19910,"bottom":19895,"after_ob_break":true}],
+    "swings": [{"type":"low","price":19820},{"type":"high","price":19880}],
+    "mtf": {"1d":"BULL","4h":"BULL","1h":"BULL_OK","15m":"BULL_OK","5m":"BULL_OK"},
+    "suggested_entry": 19850.25,
+    "suggested_sl": 19820.00,
+    "tp": 19910.50,
+    "risk_pts": 30.25
   }'
 ```

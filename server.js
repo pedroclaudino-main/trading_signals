@@ -1,12 +1,16 @@
 const express   = require("express");
 const cors      = require("cors");
 const Anthropic = require("@anthropic-ai/sdk");
+const fs        = require("fs");
+const path      = require("path");
 
 // ── Variáveis de ambiente ───────────────────────────────────────────────────
 const ANTHROPIC_API_KEY  = process.env.ANTHROPIC_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_IDS  = (process.env.TELEGRAM_CHAT_ID || "").split(",").map(s => s.trim()).filter(Boolean);
 const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET;
+const NOTIFY_NO_TRADE    = (process.env.NOTIFY_NO_TRADE || "false") === "true";
+const JOURNAL_PATH       = process.env.JOURNAL_PATH || "./trade_journal.jsonl";
 
 if (!ANTHROPIC_API_KEY) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "FATAL", msg: "ANTHROPIC_API_KEY não definida" }));
@@ -22,11 +26,10 @@ function log(level, component, msg, extra = {}) {
   (level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log)(JSON.stringify(entry));
 }
 
-// ── Rate Limiting (sem dependências externas) ──────────────────────────────
-// 10 req/min por IP. Protege contra replay attacks e custos descontrolados.
-const rateStore = new Map(); // ip -> { count, resetAt }
+// ── Rate Limiting ──────────────────────────────────────────────────────────
+const rateStore = new Map();
 const RATE_LIMIT  = 10;
-const RATE_WINDOW = 60 * 1000; // 1 minuto
+const RATE_WINDOW = 60 * 1000;
 
 function checkRateLimit(ip) {
   const now   = Date.now();
@@ -40,7 +43,6 @@ function checkRateLimit(ip) {
   return true;
 }
 
-// Limpeza periódica do rateStore (evita memory leak em sessões longas)
 setInterval(() => {
   const now = Date.now();
   for (const [ip, e] of rateStore.entries()) {
@@ -48,11 +50,9 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ── Deduplicação de payloads ───────────────────────────────────────────────
-// TradingView pode reenviar o mesmo webhook em caso de timeout/retry.
-// Um hash leve do payload (session + price + entry) previne processar 2x.
-const dedupStore = new Map(); // hash -> timestamp
-const DEDUP_TTL  = 5 * 60 * 1000; // 5 minutos
+// ── Deduplicação ───────────────────────────────────────────────────────────
+const dedupStore = new Map();
+const DEDUP_TTL  = 5 * 60 * 1000;
 
 function hashPayload(body) {
   const key = `${body.session}|${body.current_price}|${body.suggested_entry}|${body.suggested_sl}`;
@@ -75,7 +75,7 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ── Validação estrutural de candle OHLC ───────────────────────────────────
+// ── Validação estrutural de candle OHLC ────────────────────────────────────
 function isValidCandle(c) {
   return c !== null && typeof c === "object"
     && typeof c.o === "number" && typeof c.h === "number"
@@ -86,10 +86,59 @@ function isValidCandle(c) {
     && c.l <= c.o && c.l <= c.c;
 }
 
+// ── Retry helper com backoff exponencial ───────────────────────────────────
+async function withRetry(fn, { maxRetries = 2, baseDelay = 1000, label = "operation" } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxRetries) {
+        log("ERROR", "RETRY", `${label} falhou após ${maxRetries + 1} tentativas`, { error: err.message });
+        throw err;
+      }
+      const delay = baseDelay * Math.pow(2, attempt);
+      log("WARN", "RETRY", `${label} tentativa ${attempt + 1} falhou, retry em ${delay}ms`, { error: err.message });
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+// ── Fetch com timeout ──────────────────────────────────────────────────────
+function fetchWithTimeout(url, options, timeoutMs = 10000) {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout após ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+}
+
+// ── Journal — grava cada sinal num ficheiro JSONL ──────────────────────────
+function journalSignal(payload, signal, telegramResult) {
+  try {
+    const entry = {
+      ts: new Date().toISOString(),
+      session: payload.session,
+      price: payload.current_price,
+      signal: signal.signal,
+      entry: signal.entry,
+      sl: signal.sl,
+      tp: signal.tp,
+      risk_pts: signal.risk_pts,
+      confidence: signal.confidence,
+      reason: signal.reason,
+      mtf: payload.mtf || null,
+      telegram_ok: telegramResult?.ok ?? null,
+    };
+    fs.appendFileSync(JOURNAL_PATH, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    log("WARN", "JOURNAL", "Erro ao gravar journal", { error: err.message });
+  }
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 const app = express();
 
-// Security headers
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options",  "nosniff");
   res.setHeader("X-Frame-Options",         "DENY");
@@ -98,83 +147,58 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS: apenas necessário para o health endpoint (browser).
-// Webhooks TradingView são server-to-server, CORS não os afeta.
 app.use(cors({ origin: ["https://www.tradingview.com", "https://tradingview.com"] }));
 app.use(express.json({ limit: "10kb" }));
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// ── ICT Strategy prompt ────────────────────────────────────────────────────
-const STRATEGY_PROMPT = `És um analista expert em ICT (Inner Circle Trader) scalping para CME_MINI:MNQ (Micro E-mini Nasdaq-100).
+// ── ICT Strategy prompt — NOVO PAPEL: análise contextual ──────────────────
+// O Pine Script v3 já valida todas as regras mecanicamente.
+// O Claude analisa o CONTEXTO que o Pine não pode avaliar:
+// - Coerência do setup (os dados fazem sentido juntos?)
+// - Qualidade do displacement
+// - Risco elevado em condições de mercado adversas
+// - Ajuste fino dos níveis se encontrar inconsistência
+const STRATEGY_PROMPT = `És um analista expert em ICT (Inner Circle Trader) scalping para CME_MINI:MNQ.
 
-REGRAS EXACTAS DA ESTRATÉGIA — segue com precisão:
+O sinal que recebes já foi validado mecanicamente pelo indicador Pine Script:
+- OB break com displacement confirmado
+- FVG touch após o break
+- Rejeição na vela de toque (close saiu do FVG)
+- Volume acima da média no break e no toque
+- MTF alinhado em todos os timeframes
 
-1. TIMEFRAME DE ENTRADA: Gráfico de 1 MINUTO, com validação multi-timeframe obrigatória.
+O TEU PAPEL é fazer análise contextual que o código não consegue:
 
-2. JANELAS DE TRADING (hora de Lisboa WET/WEST):
-   - 14:45–15:15 | 15:45–16:15 | 16:45–17:15
-   - Fora destas janelas → NO_TRADE imediatamente.
+1. COERÊNCIA DO SETUP:
+   - Os valores de entry/sl/tp fazem sentido face ao current_price?
+   - O OB e o FVG são coerentes (FVG dentro da zona esperada após o OB)?
+   - O risco em pontos é razoável para o movimento observado?
 
-3. ANÁLISE MULTI-TIMEFRAME — OBRIGATÓRIA:
-   O sinal do Pine Script já passou por validação MTF automática. Todos os seguintes timeframes devem estar alinhados na mesma direção:
-   - 1D: trend (preço vs EMA20 diário) — define direção macro
-   - 4H: trend (preço vs EMA20 4H) — confirma tendência intermédia
-   - 1H: trend + imbalance (FVG recente) + OB recente — contexto de sessão
-   - 15m: trend + imbalance + OB — estrutura intraday
-   - 5m: trend + imbalance + OB — confluência de curto prazo
-   - 1m: OB break + FVG touch (entrada — descrito abaixo)
-   Se detectares inconsistência entre timeframes nos dados recebidos → NO_TRADE.
+2. QUALIDADE:
+   - As 3 velas mostram momentum real ou hesitação?
+   - O spread entre OB e FVG sugere força institucional ou micro-movimento?
+   - O risco vs a distância entry-OB sugere SL apertado demais ou largo demais?
 
-4. DEFINIÇÃO DE BIAS — OB BREAK (1m):
-   - Um OB bullish é quebrado quando o preço fecha ACIMA do OB high com deslocamento institucional → bias bullish.
-   - Um OB bearish é quebrado quando o preço fecha ABAIXO do OB low com deslocamento institucional → bias bearish.
-   - Deslocamento = vela de break com corpo > 1.5× o range do OB, range ≥ ATR(14)×0.8, e corpo ≥ 60% do range.
-   - O OB quebrado define o bias direcional para a sessão.
+3. MTF CONTEXT:
+   - Os dados MTF estão todos alinhados? Se algum está NEUTRAL ou apenas TREND (sem FVG+OB), reduzir confiança.
+   - mtf.1d e mtf.4h são os mais importantes — se não estão BULL/BEAR, confiança = LOW.
 
-5. ENTRY TRIGGER — FVG TOUCH (1m):
-   - Após o bias ser estabelecido pelo OB quebrado, esperar que o preço TOQUE um Fair Value Gap (FVG) alinhado com essa direção.
-   - O FVG deve ter sido formado APÓS o OB break (não antes).
-   - Bias bullish → apenas FVGs bullish → entrada LONG no ponto de toque (top do FVG bullish, onde o preço entra na zona ao descer).
-   - Bias bearish → apenas FVGs bearish → entrada SHORT no ponto de toque (bottom do FVG bearish, onde o preço entra na zona ao subir).
-   - A vela que toca o FVG deve FECHAR na direção do bias (confirmação de rejeição institucional). LONG: close > open. SHORT: close < open.
-   - O FVG expira após 20 barras sem toque.
-   - Apenas um sinal por FVG (após toque, FVG é invalidado).
-   - O FVG deve ter tamanho mínimo ≥ ATR×0.05 (sem micro-gaps).
+4. CONDIÇÕES PARA REJEIÇÃO (NO_TRADE):
+   - Entry muito longe do current_price (> 10 pontos de diferença)
+   - Risco > 50 pontos (setup largo demais para scalping)
+   - MTF com 2+ timeframes NEUTRAL
+   - Velas mostram indecisão (dojis, corpos < 30% do range)
 
-6. STOP LOSS:
-   - Swing LOW mais recente no 1m (para longs) ou swing HIGH (para shorts), confirmado com lookback de 5 barras.
-   - Arredondado ao tick de 0.25 pts (tamanho mínimo do MNQ).
+DADOS:
+- "candles_1m": últimas 3 velas [{ o, h, l, c, v }]
+- "broken_ob": { type, high, low }
+- "fvgs": [{ type, top, bottom, after_ob_break }]
+- "swings": [{ type, price }]
+- "mtf": { "1d", "4h", "1h", "15m", "5m" } — cada um "BULL"/"BEAR"/"NEUTRAL"/"BULL_OK"/"BEAR_OK"/"BULL_TREND"/"BEAR_TREND"
+- "session", "current_price", "suggested_entry", "suggested_sl", "tp", "risk_pts"
 
-7. TAKE PROFIT — R/R fixo 1:2:
-   - LONG:  TP = Entry + (Entry - SL) × 2
-   - SHORT: TP = Entry - (SL - Entry) × 2
-   - TP único, sem trailing.
-
-8. Condições NO_TRADE:
-   - Fora das janelas de trading
-   - Timeframes superiores (1D/4H/1H/15m/5m) não alinhados na mesma direção
-   - Sem OB break claro no 1m com deslocamento institucional
-   - FVG formado antes do OB break
-   - FVG não alinhado com a direção do OB quebrado
-   - Vela de toque não fecha na direção do bias (sem rejeição)
-   - Risco > 60 pontos
-   - FVG demasiado pequeno (< ATR×0.05)
-   - Estrutura ambígua ou conflituante
-
-DADOS RECEBIDOS:
-- "candles_1m": array das últimas 3 velas de 1m [{ o, h, l, c }]
-- "broken_ob": o OB que foi quebrado { type:"bullish"|"bearish", high, low }
-- "fvgs": FVGs detetados [{ type:"bullish"|"bearish", top, bottom, after_ob_break:true }]
-- "swings": swing points recentes [{ type:"high"|"low", price }]
-- "session": janela ativa ("14:45"|"15:45"|"16:45")
-- "current_price": preço atual
-- "suggested_entry": entry pré-calculado pelo indicador (toque no FVG, arredondado a 0.25)
-- "suggested_sl": SL pré-calculado (swing point, arredondado a 0.25)
-- "tp": TP pré-calculado (R/R 1:2)
-- "risk_pts": risco em pontos
-
-TAREFA: Valida o setup com base nas regras acima. Podes usar os valores pré-calculados (suggested_entry, suggested_sl, tp) como referência ou ajustar se encontrares erro na lógica. Responde APENAS com JSON válido. Sem markdown, sem comentários.
+Responde APENAS com JSON válido. Sem markdown.
 
 {
   "signal": "LONG" | "SHORT" | "NO_TRADE",
@@ -192,37 +216,51 @@ TAREFA: Valida o setup com base nas regras acima. Podes usar os valores pré-cal
 }`;
 
 // ── Telegram ───────────────────────────────────────────────────────────────
-async function sendTelegram(signal) {
+async function sendTelegram(signal, isNoTrade = false) {
   if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
     log("WARN", "TELEGRAM", "Telegram desativado — credenciais não configuradas");
     return { ok: false, reason: "telegram_not_configured" };
   }
 
-  const dir      = signal.signal === "LONG" ? "▲ LONG" : "▼ SHORT";
-  const emoji    = signal.signal === "LONG" ? "🟢" : "🔴";
-  const confKey  = (signal.confidence || "").toUpperCase();
-  const conf     = { HIGH: "🔥 Alta", MEDIUM: "⚡ Média", LOW: "⚠️ Baixa" }[confKey] || "❓ Desconhecida";
-  const risk     = typeof signal.risk_pts === "number" ? `${signal.risk_pts.toFixed(2)} pts` : "—";
+  let msg;
+  if (isNoTrade) {
+    msg =
+      `⚪ NO TRADE — MNQ\n` +
+      `━━━━━━━━━━━━━━━━━\n` +
+      `📊 Sessão: ${signal.session || "—"}\n` +
+      `💬 ${signal.reason || signal.no_trade_reason || "Setup rejeitado"}`;
+  } else {
+    const dir      = signal.signal === "LONG" ? "▲ LONG" : "▼ SHORT";
+    const emoji    = signal.signal === "LONG" ? "🟢" : "🔴";
+    const confKey  = (signal.confidence || "").toUpperCase();
+    const conf     = { HIGH: "🔥 Alta", MEDIUM: "⚡ Média", LOW: "⚠️ Baixa" }[confKey] || "❓ Desconhecida";
+    const risk     = typeof signal.risk_pts === "number" ? `${signal.risk_pts.toFixed(2)} pts` : "—";
 
-  const msg =
-    `${emoji} TRADE ALERT — MNQ\n` +
-    `━━━━━━━━━━━━━━━━━\n` +
-    `Direção: ${dir}\n` +
-    `Confiança: ${conf}\n\n` +
-    `🎯 Entry:  ${typeof signal.entry  === "number" ? signal.entry.toFixed(2)  : "—"}\n` +
-    `✅ TP:     ${typeof signal.tp     === "number" ? signal.tp.toFixed(2)     : "—"}\n` +
-    `❌ SL:     ${typeof signal.sl     === "number" ? signal.sl.toFixed(2)     : "—"}\n\n` +
-    `📊 R/R: 1:2  |  Risco: ${risk}\n` +
-    `🔍 OB partido: ${signal.broken_ob_direction || "—"}  |  FVG: ${signal.fvg_touched || "—"}\n\n` +
-    `💬 ${signal.reason || "Sem razão fornecida"}`;
+    msg =
+      `${emoji} TRADE ALERT — MNQ\n` +
+      `━━━━━━━━━━━━━━━━━\n` +
+      `Direção: ${dir}\n` +
+      `Confiança: ${conf}\n\n` +
+      `🎯 Entry:  ${typeof signal.entry  === "number" ? signal.entry.toFixed(2)  : "—"}\n` +
+      `✅ TP:     ${typeof signal.tp     === "number" ? signal.tp.toFixed(2)     : "—"}\n` +
+      `❌ SL:     ${typeof signal.sl     === "number" ? signal.sl.toFixed(2)     : "—"}\n\n` +
+      `📊 R/R: 1:2  |  Risco: ${risk}\n` +
+      `🔍 OB: ${signal.broken_ob_direction || "—"}  |  FVG: ${signal.fvg_touched || "—"}\n` +
+      `📈 MTF: ${signal.mtf_aligned ? "✓ Alinhado" : "✗ Desalinhado"}\n\n` +
+      `💬 ${signal.reason || "Sem razão fornecida"}`;
+  }
 
   const results = await Promise.allSettled(
     TELEGRAM_CHAT_IDS.map(async (chatId) => {
-      const res  = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ chat_id: chatId, text: msg }),
-      });
+      const res = await fetchWithTimeout(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ chat_id: chatId, text: msg }),
+        },
+        10000
+      );
       const data = await res.json();
       if (!data.ok) log("WARN", "TELEGRAM", `Falhou para ${chatId}`, { description: data.description });
       return { chatId, ...data };
@@ -234,8 +272,8 @@ async function sendTelegram(signal) {
   return { ok: sent > 0, sent, total: TELEGRAM_CHAT_IDS.length };
 }
 
-// ── Validação do signal retornado pelo Claude ──────────────────────────────
-function validateSignal(signal) {
+// ── Validação do signal — MELHORADA ───────────────────────────────────────
+function validateSignal(signal, payload) {
   if (!signal || !["LONG", "SHORT", "NO_TRADE"].includes(signal.signal))
     return { valid: false, reason: `signal inválido: ${signal?.signal}` };
 
@@ -243,11 +281,37 @@ function validateSignal(signal) {
     if (typeof signal.entry !== "number" || typeof signal.sl !== "number" || typeof signal.tp !== "number")
       return { valid: false, reason: `${signal.signal} sem entry/sl/tp numéricos` };
 
-    // Sanity check: SL do lado correto
+    // SL do lado correto
     if (signal.signal === "LONG"  && signal.sl >= signal.entry)
       return { valid: false, reason: "LONG com SL >= entry" };
     if (signal.signal === "SHORT" && signal.sl <= signal.entry)
       return { valid: false, reason: "SHORT com SL <= entry" };
+
+    // TP do lado correto
+    if (signal.signal === "LONG"  && signal.tp <= signal.entry)
+      return { valid: false, reason: "LONG com TP <= entry" };
+    if (signal.signal === "SHORT" && signal.tp >= signal.entry)
+      return { valid: false, reason: "SHORT com TP >= entry" };
+
+    // R:R sanity — deve estar entre 1.5 e 3.0 (target 2.0)
+    const risk   = Math.abs(signal.entry - signal.sl);
+    const reward = Math.abs(signal.tp - signal.entry);
+    if (risk > 0) {
+      const rr = reward / risk;
+      if (rr < 1.5 || rr > 3.0)
+        return { valid: false, reason: `R:R fora do range: ${rr.toFixed(2)} (esperado 1.5-3.0)` };
+    }
+
+    // Risk em pontos não deve exceder 60
+    if (typeof signal.risk_pts === "number" && signal.risk_pts > 60)
+      return { valid: false, reason: `Risco ${signal.risk_pts.toFixed(1)} pts > 60 max` };
+
+    // Entry deve estar perto do current_price (dentro de 20 pontos)
+    if (typeof payload.current_price === "number") {
+      const diff = Math.abs(signal.entry - payload.current_price);
+      if (diff > 20)
+        return { valid: false, reason: `Entry ${diff.toFixed(1)} pts longe do preço atual` };
+    }
   }
   return { valid: true };
 }
@@ -262,7 +326,7 @@ app.post("/webhook", async (req, res) => {
     return res.status(429).json({ error: "rate_limit_exceeded" });
   }
 
-  // 2. Autenticação via shared secret
+  // 2. Autenticação
   if (WEBHOOK_SECRET) {
     const provided = req.headers["x-webhook-secret"] || req.body?.webhook_secret;
     if (provided !== WEBHOOK_SECRET) {
@@ -272,7 +336,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   const {
-    candles_1m, broken_ob, fvgs, swings,
+    candles_1m, broken_ob, fvgs, swings, mtf,
     session, current_price, suggested_entry, suggested_sl, tp, risk_pts,
   } = req.body;
 
@@ -286,32 +350,41 @@ app.post("/webhook", async (req, res) => {
   if (!Array.isArray(candles_1m) || candles_1m.length < 1)
     return res.status(400).json({ error: "candles_1m deve ser array com >= 1 vela" });
 
-  // 4. Validação estrutural dos candles (nova)
+  // 4. Validação estrutural dos candles
   const invalidCandle = candles_1m.find(c => !isValidCandle(c));
   if (invalidCandle)
     return res.status(400).json({ error: "candle inválido: OHLC inconsistente", candle: invalidCandle });
 
-  // 5. Deduplicação (nova) — previne processar o mesmo sinal 2×
+  // 5. Deduplicação
   const payloadHash = hashPayload(req.body);
   if (isDuplicate(payloadHash)) {
     log("WARN", "WEBHOOK", "Payload duplicado ignorado", { hash: payloadHash, session });
     return res.status(200).json({ ok: true, signal: null, duplicate: true });
   }
 
-  log("INFO", "WEBHOOK", "Sinal recebido", { session, price: current_price, ob: broken_ob?.type || "none", ip: clientIp });
+  log("INFO", "WEBHOOK", "Sinal recebido", {
+    session, price: current_price,
+    ob: broken_ob?.type || "none",
+    mtf: mtf || "not_provided",
+    ip: clientIp,
+  });
 
   try {
     const payload = JSON.stringify({
-      candles_1m, broken_ob, fvgs, swings,
+      candles_1m, broken_ob, fvgs, swings, mtf,
       session, current_price, suggested_entry, suggested_sl, tp, risk_pts,
     });
 
-    const message = await anthropic.messages.create({
-      model:    "claude-sonnet-4-6",
-      max_tokens: 600,
-      system:   STRATEGY_PROMPT,
-      messages: [{ role: "user", content: `Analisa estes dados de mercado 1m e retorna o signal:\n${payload}` }],
-    }, { timeout: 15000 });
+    // Chamada ao Claude COM retry
+    const message = await withRetry(
+      () => anthropic.messages.create({
+        model:      "claude-sonnet-4-6",
+        max_tokens: 600,
+        system:     STRATEGY_PROMPT,
+        messages:   [{ role: "user", content: `Analisa este setup e retorna o signal:\n${payload}` }],
+      }, { timeout: 15000 }),
+      { maxRetries: 2, baseDelay: 1000, label: "Claude API" }
+    );
 
     const raw = message.content[0].text.trim();
     log("INFO", "CLAUDE", "Resposta recebida", { preview: raw.substring(0, 150) });
@@ -326,7 +399,7 @@ app.post("/webhook", async (req, res) => {
         : { signal: "NO_TRADE", reason: "Erro ao processar resposta do AI", no_trade_reason: "parse_error" };
     }
 
-    const validation = validateSignal(signal);
+    const validation = validateSignal(signal, req.body);
     if (!validation.valid) {
       log("WARN", "VALIDAÇÃO", "Signal rejeitado", { reason: validation.reason });
       signal = {
@@ -334,6 +407,7 @@ app.post("/webhook", async (req, res) => {
         entry: null, sl: null, tp: null, risk_pts: null,
         rr: null, broken_ob_direction: "NONE", fvg_touched: "NONE",
         confidence: "LOW", no_trade_reason: validation.reason,
+        mtf_aligned: false,
       };
     }
 
@@ -342,10 +416,21 @@ app.post("/webhook", async (req, res) => {
       try {
         telegramResult = await sendTelegram(signal);
       } catch (err) {
-        log("ERROR", "TELEGRAM", "Erro ao enviar", { error: err.message });
+        log("ERROR", "TELEGRAM", "Erro ao enviar trade alert", { error: err.message });
         telegramResult = { ok: false, error: "telegram_send_failed" };
       }
+    } else if (NOTIFY_NO_TRADE) {
+      // Notificação opcional de NO_TRADE para debugging
+      try {
+        signal.session = session; // attach session for the message
+        telegramResult = await sendTelegram(signal, true);
+      } catch (err) {
+        log("WARN", "TELEGRAM", "Erro ao enviar NO_TRADE notification", { error: err.message });
+      }
     }
+
+    // Journal — grava todos os sinais (trade e no_trade)
+    journalSignal(req.body, signal, telegramResult);
 
     res.json({ ok: true, signal, telegram: telegramResult });
 
@@ -359,17 +444,35 @@ app.post("/webhook", async (req, res) => {
 app.get("/", (req, res) =>
   res.json({
     status:       "online",
-    strategy:     "ICT 1m — OB break + FVG touch, R/R 1:2",
+    version:      "v3",
+    strategy:     "ICT 1m — OB break + FVG touch, R/R 1:2, volume + MTF",
     telegram:     TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
+    journal:      JOURNAL_PATH,
+    notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
   })
 );
 
+// ── Journal viewer (últimos N sinais) ──────────────────────────────────────
+app.get("/journal", (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+    if (!fs.existsSync(JOURNAL_PATH)) return res.json({ entries: [] });
+    const lines = fs.readFileSync(JOURNAL_PATH, "utf8").trim().split("\n").filter(Boolean);
+    const entries = lines.slice(-limit).map(l => {
+      try { return JSON.parse(l); } catch { return null; }
+    }).filter(Boolean);
+    res.json({ total: lines.length, showing: entries.length, entries });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao ler journal" });
+  }
+});
+
 // ── Arranque + graceful shutdown ───────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const server = app.listen(PORT, () =>
-  log("INFO", "STARTUP", `Server running on port ${PORT}`)
+  log("INFO", "STARTUP", `Server v3 running on port ${PORT}`)
 );
 
 process.on("SIGTERM", () => {
