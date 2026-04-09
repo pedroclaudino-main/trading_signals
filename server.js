@@ -184,7 +184,14 @@ O TEU PAPEL é fazer análise contextual que o código não consegue:
    - Os dados MTF estão todos alinhados? Se algum está NEUTRAL ou apenas TREND (sem FVG+OB), reduzir confiança.
    - mtf.1d e mtf.4h são os mais importantes — se não estão BULL/BEAR, confiança = LOW.
 
-4. CONDIÇÕES PARA REJEIÇÃO (NO_TRADE):
+4. MOMENTUM & INSTITUTIONAL BIAS (dados blackcat1402):
+   - "momentum": 0-100, valores < 20 = oversold, > 80 = overbought
+   - "institutional_bias": "BULLISH"/"BEARISH"/"NEUTRAL" (SMA3/10/20 alignment)
+   - LONG em overbought (> 85) ou com institutional_bias != BULLISH → reduzir confiança (não rejeitar)
+   - SHORT em oversold (< 15) ou com institutional_bias != BEARISH → reduzir confiança (não rejeitar)
+   - Usar como factor de qualidade, NÃO como filtro absoluto
+
+5. CONDIÇÕES PARA REJEIÇÃO (NO_TRADE):
    - Entry muito longe do current_price (> 10 pontos de diferença)
    - Risco > 50 pontos (setup largo demais para scalping)
    - MTF com 2+ timeframes NEUTRAL
@@ -196,6 +203,8 @@ DADOS:
 - "fvgs": [{ type, top, bottom, after_ob_break }]
 - "swings": [{ type, price }]
 - "mtf": { "1d", "4h", "1h", "15m", "5m" } — cada um "BULL"/"BEAR"/"NEUTRAL"/"BULL_OK"/"BEAR_OK"/"BULL_TREND"/"BEAR_TREND"
+- "momentum": número 0-100 (weighted price oscillator, EMA-smoothed)
+- "institutional_bias": "BULLISH" | "BEARISH" | "NEUTRAL" (SMA crossover alignment)
 - "session", "current_price", "suggested_entry", "suggested_sl", "tp", "risk_pts"
 
 Responde APENAS com JSON válido. Sem markdown.
@@ -340,6 +349,7 @@ app.post("/webhook", async (req, res) => {
   const {
     candles_1m, broken_ob, fvgs, swings, mtf,
     session, current_price, suggested_entry, suggested_sl, tp, risk_pts,
+    momentum, institutional_bias,
   } = req.body;
 
   // 3. Validação de campos obrigatórios
@@ -374,6 +384,7 @@ app.post("/webhook", async (req, res) => {
   try {
     const payload = JSON.stringify({
       candles_1m, broken_ob, fvgs, swings, mtf,
+      momentum, institutional_bias,
       session, current_price, suggested_entry, suggested_sl, tp, risk_pts,
     });
 

@@ -33,7 +33,7 @@ strategy("Trading_Signals v3 — Backtest", overlay=true, max_bars_back=500,
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
-obStrength    = input.float(1.5,  "OB Strength (multiplier)", minval=1.0, maxval=3.0, group="Estratégia")
+obStrength    = input.float(1.0,  "OB Strength (multiplier)", minval=0.5, maxval=3.0, group="Estratégia")
 maxRiskPts    = input.float(60.0, "Max Risk (pontos)",         minval=10.0,            group="Estratégia")
 i_contracts   = input.int  (1,    "Contratos por trade",       minval=1,   maxval=10,  group="Backtest")
 maxDailyTrades= input.int  (3,    "Max trades por dia",        minval=1,   maxval=10,  group="Backtest")
@@ -46,7 +46,7 @@ useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                  
 useVolFilter  = input.bool (true, "Filtro: Volume acima média",                        group="Filtros")
 volMultiplier = input.float(1.2,  "Volume Min (× SMA20)",      minval=1.0, maxval=3.0, group="Filtros")
 maxSignalsSes = input.int  (1,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
-minRejectBody = input.float(0.3,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
+minRejectBody = input.float(0.2,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
 maxSwingAge   = input.int  (50,   "Swing Max Age (barras)",       minval=10,  maxval=200,  group="Filtros")
 
 useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
@@ -75,9 +75,25 @@ volSma = ta.sma(volume, 20)
 isDisplacement(offset) =>
     r = high[offset] - low[offset]
     b = math.abs(close[offset] - open[offset])
-    r >= atr * 0.8 and b >= r * 0.6
+    r >= atr * 0.5 and b >= r * 0.5
 
 hasVolume() => not useVolFilter or (volume > volSma * volMultiplier)
+
+// ── Momentum Score (inspirado blackcat1402 Swing Trade Oscillator) ────────
+// Weighted price normalizado 0-100, com zonas oversold/overbought
+wp        = (2 * close + high + low + open) / 5.0
+wpHigh    = ta.highest(wp, 25)
+wpLow     = ta.lowest(wp, 11)
+momentum  = wpHigh != wpLow ? (wp - wpLow) / (wpHigh - wpLow) * 100 : 50
+momSmooth = ta.ema(momentum, 5)
+
+// ── Institutional Bias (inspirado blackcat1402 Bias Scalper) ──────────────
+// SMA crossovers multi-período: se SMAs curtas > longas = institutional push
+sma3  = ta.sma(close, 3)
+sma10 = ta.sma(close, 10)
+sma20 = ta.sma(close, 20)
+instBullish = sma3 > sma10 and sma10 > sma20
+instBearish = sma3 < sma10 and sma10 < sma20
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MULTI-TIMEFRAME — trend direction only (close vs EMA)
@@ -180,19 +196,19 @@ if newBullFVG
     bullFVG_top := low[0], bullFVG_bottom := high[2]
     bullFVG_bar := bar_index, bullFVG_active := true
     box.delete(lastBullBox)
-    lastBullBox := box.new(bar_index - 2, bullFVG_top, bar_index + 20, bullFVG_bottom,
+    lastBullBox := box.new(bar_index - 2, bullFVG_top, bar_index + 40, bullFVG_bottom,
                             border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 88))
 
 if newBearFVG
     bearFVG_top := low[2], bearFVG_bottom := high[0]
     bearFVG_bar := bar_index, bearFVG_active := true
     box.delete(lastBearBox)
-    lastBearBox := box.new(bar_index - 2, bearFVG_top, bar_index + 20, bearFVG_bottom,
+    lastBearBox := box.new(bar_index - 2, bearFVG_top, bar_index + 40, bearFVG_bottom,
                             border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 88))
 
-if bullFVG_active and (bar_index - bullFVG_bar) > 20
+if bullFVG_active and (bar_index - bullFVG_bar) > 40
     bullFVG_active := false, box.delete(lastBullBox)
-if bearFVG_active and (bar_index - bearFVG_bar) > 20
+if bearFVG_active and (bar_index - bearFVG_bar) > 40
     bearFVG_active := false, box.delete(lastBearBox)
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -249,6 +265,8 @@ if touchesBullFVG
 if touchesBearFVG
     bearFVG_active := false
 
+// Momentum + institutional bias são enviados no webhook para análise Claude AI (soft filter)
+// Não são hard gates para não bloquear trades válidos
 longSignal  = inSession and touchesBullFVG and bullReject and not na(lastSwingLow)
 shortSignal = inSession and touchesBearFVG and bearReject and not na(lastSwingHigh)
 
