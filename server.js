@@ -1,5 +1,6 @@
 const express   = require("express");
 const cors      = require("cors");
+const crypto    = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 const fs        = require("fs");
 const path      = require("path");
@@ -28,13 +29,15 @@ function log(level, component, msg, extra = {}) {
 
 // ── Rate Limiting ──────────────────────────────────────────────────────────
 const rateStore = new Map();
-const RATE_LIMIT  = 10;
-const RATE_WINDOW = 60 * 1000;
+const RATE_LIMIT     = 10;
+const RATE_WINDOW    = 60 * 1000;
+const RATE_MAX_KEYS  = 10000; // protecção contra IP spoofing massivo
 
 function checkRateLimit(ip) {
   const now   = Date.now();
   const entry = rateStore.get(ip);
   if (!entry || now > entry.resetAt) {
+    if (!entry && rateStore.size >= RATE_MAX_KEYS) return false; // reject se store cheia
     rateStore.set(ip, { count: 1, resetAt: now + RATE_WINDOW });
     return true;
   }
@@ -55,7 +58,7 @@ const dedupStore = new Map();
 const DEDUP_TTL  = 5 * 60 * 1000;
 
 function hashPayload(body) {
-  const key = `${body.session}|${body.current_price}|${body.suggested_entry}|${body.suggested_sl}`;
+  const key = `${body.session ?? ""}|${body.current_price ?? ""}|${body.suggested_entry ?? ""}|${body.suggested_sl ?? ""}`;
   let h = 5381;
   for (let i = 0; i < key.length; i++) h = (((h << 5) + h) ^ key.charCodeAt(i)) >>> 0;
   return h.toString(36);
@@ -103,41 +106,38 @@ async function withRetry(fn, { maxRetries = 2, baseDelay = 1000, label = "operat
   }
 }
 
-// ── Fetch com timeout ──────────────────────────────────────────────────────
+// ── Fetch com timeout (AbortController cancela o fetch real) ───────────────
 function fetchWithTimeout(url, options, timeoutMs = 10000) {
-  return Promise.race([
-    fetch(url, options),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout após ${timeoutMs}ms`)), timeoutMs)
-    ),
-  ]);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
 }
 
-// ── Journal — grava cada sinal num ficheiro JSONL ──────────────────────────
+// ── Journal — grava cada sinal num ficheiro JSONL (async) ──────────────────
 function journalSignal(payload, signal, telegramResult) {
-  try {
-    const entry = {
-      ts: new Date().toISOString(),
-      session: payload.session,
-      price: payload.current_price,
-      signal: signal.signal,
-      entry: signal.entry,
-      sl: signal.sl,
-      tp: signal.tp,
-      risk_pts: signal.risk_pts,
-      confidence: signal.confidence,
-      reason: signal.reason,
-      mtf: payload.mtf || null,
-      telegram_ok: telegramResult?.ok ?? null,
-    };
-    fs.appendFileSync(JOURNAL_PATH, JSON.stringify(entry) + "\n");
-  } catch (err) {
-    log("WARN", "JOURNAL", "Erro ao gravar journal", { error: err.message });
-  }
+  const entry = {
+    ts: new Date().toISOString(),
+    session: payload.session,
+    price: payload.current_price,
+    signal: signal.signal,
+    entry: signal.entry,
+    sl: signal.sl,
+    tp: signal.tp,
+    risk_pts: signal.risk_pts,
+    confidence: signal.confidence,
+    reason: signal.reason,
+    mtf: payload.mtf || null,
+    telegram_ok: telegramResult?.ok ?? null,
+  };
+  fs.appendFile(JOURNAL_PATH, JSON.stringify(entry) + "\n", (err) => {
+    if (err) log("WARN", "JOURNAL", "Erro ao gravar journal", { error: err.message });
+  });
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
 const app = express();
+app.set("trust proxy", 1); // confia no primeiro proxy (Railway/Render)
 
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options",  "nosniff");
@@ -320,16 +320,18 @@ function validateSignal(signal, payload) {
 app.post("/webhook", async (req, res) => {
 
   // 1. Rate limiting
-  const clientIp = req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+  const clientIp = req.ip || "unknown";
   if (!checkRateLimit(clientIp)) {
     log("WARN", "WEBHOOK", "Rate limit excedido", { ip: clientIp });
     return res.status(429).json({ error: "rate_limit_exceeded" });
   }
 
-  // 2. Autenticação
+  // 2. Autenticação (timing-safe para prevenir timing attacks)
   if (WEBHOOK_SECRET) {
-    const provided = req.headers["x-webhook-secret"] || req.body?.webhook_secret;
-    if (provided !== WEBHOOK_SECRET) {
+    const provided = req.headers["x-webhook-secret"] || req.body?.webhook_secret || "";
+    const secretBuf   = Buffer.from(WEBHOOK_SECRET, "utf8");
+    const providedBuf = Buffer.from(String(provided), "utf8");
+    if (secretBuf.length !== providedBuf.length || !crypto.timingSafeEqual(secretBuf, providedBuf)) {
       log("WARN", "WEBHOOK", "Secret inválido rejeitado", { ip: clientIp });
       return res.status(401).json({ error: "unauthorized" });
     }
@@ -454,17 +456,30 @@ app.get("/", (req, res) =>
   })
 );
 
-// ── Journal viewer (últimos N sinais) ──────────────────────────────────────
+// ── Journal viewer (últimos N sinais — leitura parcial para ficheiros grandes)
 app.get("/journal", (req, res) => {
+  let fd;
   try {
     const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
     if (!fs.existsSync(JOURNAL_PATH)) return res.json({ entries: [] });
-    const lines = fs.readFileSync(JOURNAL_PATH, "utf8").trim().split("\n").filter(Boolean);
+
+    const stat = fs.statSync(JOURNAL_PATH);
+    // Para ficheiros pequenos (<1MB), ler tudo; para grandes, ler só o final
+    const MAX_READ = 1024 * 1024; // 1MB
+    const readSize = Math.min(stat.size, MAX_READ);
+    const buf = Buffer.alloc(readSize);
+    fd = fs.openSync(JOURNAL_PATH, "r");
+    fs.readSync(fd, buf, 0, readSize, Math.max(0, stat.size - readSize));
+    fs.closeSync(fd);
+    fd = undefined;
+
+    const lines = buf.toString("utf8").trim().split("\n").filter(Boolean);
     const entries = lines.slice(-limit).map(l => {
       try { return JSON.parse(l); } catch { return null; }
     }).filter(Boolean);
-    res.json({ total: lines.length, showing: entries.length, entries });
+    res.json({ total: stat.size < MAX_READ ? lines.length : "~" + lines.length, showing: entries.length, entries });
   } catch (err) {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
     res.status(500).json({ error: "Erro ao ler journal" });
   }
 });
@@ -475,7 +490,13 @@ const server = app.listen(PORT, () =>
   log("INFO", "STARTUP", `Server v3 running on port ${PORT}`)
 );
 
-process.on("SIGTERM", () => {
-  log("INFO", "SHUTDOWN", "SIGTERM recebido — a encerrar...");
+function gracefulShutdown(signal) {
+  log("INFO", "SHUTDOWN", `${signal} recebido — a encerrar...`);
   server.close(() => process.exit(0));
-});
+  setTimeout(() => {
+    log("WARN", "SHUTDOWN", "Forçando encerramento após timeout");
+    process.exit(1);
+  }, 10000).unref();
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));

@@ -27,9 +27,9 @@ mtfEmaLen     = input.int  (20,   "MTF EMA Period",  minval=5,   maxval=50,     
 // ═══════════════════════════════════════════════════════════════════════════
 // SESSIONS
 // ═══════════════════════════════════════════════════════════════════════════
-inSession1 = not na(time(timeframe.period, "1445-1515:1234567", "Europe/Lisbon"))
-inSession2 = not na(time(timeframe.period, "1545-1615:1234567", "Europe/Lisbon"))
-inSession3 = not na(time(timeframe.period, "1645-1715:1234567", "Europe/Lisbon"))
+inSession1 = not na(time(timeframe.period, "1445-1515:23456", "Europe/Lisbon"))
+inSession2 = not na(time(timeframe.period, "1545-1615:23456", "Europe/Lisbon"))
+inSession3 = not na(time(timeframe.period, "1645-1715:23456", "Europe/Lisbon"))
 inSession   = inSession1 or inSession2 or inSession3
 sessionLabel = inSession1 ? "14:45" : inSession2 ? "15:45" : inSession3 ? "16:45" : "N/A"
 
@@ -232,10 +232,21 @@ if bearFVG_active and (bar_index - bearFVG_bar) > 20
 swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
 swingLow  = ta.pivotlow (low,  swingLookback, swingLookback)
 var float lastSwingHigh = na, var float lastSwingLow = na
+var int   swingHighBar  = na, var int   swingLowBar  = na
+maxSwingAge = input.int(50, "Swing Max Age (barras)", minval=10, maxval=200, group="Filtros")
+
 if not na(swingHigh)
     lastSwingHigh := swingHigh
+    swingHighBar  := bar_index
 if not na(swingLow)
     lastSwingLow := swingLow
+    swingLowBar  := bar_index
+
+// Expirar swings demasiado antigos
+if not na(swingHighBar) and (bar_index - swingHighBar) > maxSwingAge
+    lastSwingHigh := na
+if not na(swingLowBar) and (bar_index - swingLowBar) > maxSwingAge
+    lastSwingLow := na
 
 plot(swingHigh, "Swing High", color.new(color.red,   40), 2, plot.style_cross, offset=-swingLookback)
 plot(swingLow,  "Swing Low",  color.new(color.green, 40), 2, plot.style_cross, offset=-swingLookback)
@@ -338,7 +349,7 @@ if barstate.islastconfirmedhistory or barstate.islast
     table.cell(legend, 1, 4,  "Bear OB Break",   text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 0, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
     table.cell(legend, 1, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
-    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useVolFilter ? "VOL" : "")
+    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useVolFilter ? "VOL " : "") + (useMTF ? "MTF" : "")
     table.cell(legend, 0, 6,  "Filtros:",        text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 1, 6,  _f != "" ? _f : "—", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
     _biasColor = bias == "BULLISH" ? color.lime : bias == "BEARISH" ? color.orange : color.gray
