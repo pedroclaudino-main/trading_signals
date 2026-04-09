@@ -60,75 +60,27 @@ isDisplacement(offset) =>
 hasVolume() => not useVolFilter or (volume > volSma * volMultiplier)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MULTI-TIMEFRAME ANALYSIS — CORRIGIDO v3
-//
-// FIX 1: Trend comparado DENTRO do request.security (close do TF correto)
-// FIX 2: FVG limitado a 3 barras do HTF
-// FIX 3: OB no MTF com verificação de momentum
+// MULTI-TIMEFRAME — trend direction only (close vs EMA)
+// Validação estrutural (OB + FVG) fica exclusivamente no 1m.
+// HTFs confirmam apenas direcção macro para não bloquear setups válidos.
 // ═══════════════════════════════════════════════════════════════════════════
-
 mtf_trend_bull(emaLen) => close > ta.ema(close, emaLen)
 mtf_trend_bear(emaLen) => close < ta.ema(close, emaLen)
 
-mtf_has_bull_fvg() => low > high[2] or low[1] > high[3]
-mtf_has_bear_fvg() => high < low[2] or high[1] < low[3]
+d_bull  = request.security(syminfo.tickerid, "D",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+d_bear  = request.security(syminfo.tickerid, "D",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h4_bull = request.security(syminfo.tickerid, "240",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h4_bear = request.security(syminfo.tickerid, "240",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h1_bull = request.security(syminfo.tickerid, "60",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h1_bear = request.security(syminfo.tickerid, "60",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m15_bull = request.security(syminfo.tickerid, "15",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m15_bear = request.security(syminfo.tickerid, "15",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m5_bull  = request.security(syminfo.tickerid, "5",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m5_bear  = request.security(syminfo.tickerid, "5",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 
-mtf_has_bull_ob() =>
-    ob1 = close[1] < open[1] and close > open and (close - open) > (high[1] - low[1]) * 1.0
-    ob2 = close[2] < open[2] and close[1] > open[1] and (close[1] - open[1]) > (high[2] - low[2]) * 1.0
-    ob1 or ob2
-
-mtf_has_bear_ob() =>
-    ob1 = close[1] > open[1] and close < open and (open - close) > (high[1] - low[1]) * 1.0
-    ob2 = close[2] > open[2] and close[1] < open[1] and (open[1] - close[1]) > (high[2] - low[2]) * 1.0
-    ob1 or ob2
-
-// ── 1D — Trend ──────────────────────────────────────────────────────────
-d_bull = request.security(syminfo.tickerid, "D",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
-d_bear = request.security(syminfo.tickerid, "D",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
-
-// ── 4H — Trend ──────────────────────────────────────────────────────────
-h4_bull = request.security(syminfo.tickerid, "240", mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
-h4_bear = request.security(syminfo.tickerid, "240", mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
-
-// ── 1H — Trend + FVG + OB ──────────────────────────────────────────────
-[h1_tbull, h1_tbear, h1_bfvg, h1_sfvg, h1_bob, h1_sob] = request.security(
-     syminfo.tickerid, "60",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-
-h1_bull_ok = h1_tbull and h1_bfvg and h1_bob
-h1_bear_ok = h1_tbear and h1_sfvg and h1_sob
-
-// ── 15m — Trend + FVG + OB ─────────────────────────────────────────────
-[m15_tbull, m15_tbear, m15_bfvg, m15_sfvg, m15_bob, m15_sob] = request.security(
-     syminfo.tickerid, "15",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-
-m15_bull_ok = m15_tbull and m15_bfvg and m15_bob
-m15_bear_ok = m15_tbear and m15_sfvg and m15_sob
-
-// ── 5m — Trend + FVG + OB ──────────────────────────────────────────────
-[m5_tbull, m5_tbear, m5_bfvg, m5_sfvg, m5_bob, m5_sob] = request.security(
-     syminfo.tickerid, "5",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-
-m5_bull_ok = m5_tbull and m5_bfvg and m5_bob
-m5_bear_ok = m5_tbear and m5_sfvg and m5_sob
-
-// ── Consolidação ─────────────────────────────────────────────────────────
-// 1D, 4H, 1H: full alignment obrigatório (trend + FVG + OB)
-// 15m, 5m: apenas trend (micro-correções não invalidam o setup macro)
-mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull_ok and m15_tbull and m5_tbull)
-mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear_ok and m15_tbear and m5_tbear)
+// Todos os TFs devem apontar na mesma direcção (trend only)
+mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull and m15_bull and m5_bull)
+mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear and m15_bear and m5_bear)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORDER BLOCK DETECTION (1m) — com historial de 2 OBs
@@ -376,19 +328,19 @@ if barstate.islastconfirmedhistory or barstate.islast
     table.cell(legend, 1, 10, useMTF ? "ON" : "OFF", text_color=useMTF ? color.green : color.red, text_size=size.small, text_halign=text.align_left)
     _d   = d_bull   ? "▲" : d_bear   ? "▼" : "—"
     _h4  = h4_bull  ? "▲" : h4_bear  ? "▼" : "—"
-    _h1  = h1_bull_ok ? "▲ T+I+O" : h1_bear_ok ? "▼ T+I+O" : h1_tbull ? "▲ T" : h1_tbear ? "▼ T" : "—"
-    _m15 = m15_bull_ok ? "▲ T+I+O" : m15_bear_ok ? "▼ T+I+O" : m15_tbull ? "▲ T" : m15_tbear ? "▼ T" : "—"
-    _m5  = m5_bull_ok ? "▲ T+I+O" : m5_bear_ok ? "▼ T+I+O" : m5_tbull ? "▲ T" : m5_tbear ? "▼ T" : "—"
+    _h1  = h1_bull  ? "▲" : h1_bear  ? "▼" : "—"
+    _m15 = m15_bull ? "▲" : m15_bear ? "▼" : "—"
+    _m5  = m5_bull  ? "▲" : m5_bear  ? "▼" : "—"
     table.cell(legend, 0, 11, "1D",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 1, 11, _d,               text_color=d_bull ? color.green : d_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 0, 12, "4H",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 1, 12, _h4,              text_color=h4_bull ? color.green : h4_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 0, 13, "1H",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 13, _h1,              text_color=h1_bull_ok ? color.green : h1_bear_ok ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 13, _h1,              text_color=h1_bull ? color.green : h1_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 0, 14, "15m",             text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 14, _m15,             text_color=m15_bull_ok ? color.green : m15_bear_ok ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 14, _m15,             text_color=m15_bull ? color.green : m15_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 0, 15, "5m",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 15, _m5,              text_color=m5_bull_ok ? color.green : m5_bear_ok ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 15, _m5,              text_color=m5_bull ? color.green : m5_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
     _m1 = bias == "BULLISH" ? "▲ T+I+O" : bias == "BEARISH" ? "▼ T+I+O" : "—"
     table.cell(legend, 0, 16, "1m",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
     table.cell(legend, 1, 16, _m1,              text_color=bias == "BULLISH" ? color.green : bias == "BEARISH" ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
@@ -425,9 +377,9 @@ if (validLong or validShort) and barstate.isconfirmed
 
     _mtf_d   = d_bull ? "BULL" : d_bear ? "BEAR" : "NEUTRAL"
     _mtf_h4  = h4_bull ? "BULL" : h4_bear ? "BEAR" : "NEUTRAL"
-    _mtf_h1  = h1_bull_ok ? "BULL_OK" : h1_bear_ok ? "BEAR_OK" : h1_tbull ? "BULL_TREND" : h1_tbear ? "BEAR_TREND" : "NEUTRAL"
-    _mtf_m15 = m15_bull_ok ? "BULL_OK" : m15_bear_ok ? "BEAR_OK" : m15_tbull ? "BULL_TREND" : m15_tbear ? "BEAR_TREND" : "NEUTRAL"
-    _mtf_m5  = m5_bull_ok ? "BULL_OK" : m5_bear_ok ? "BEAR_OK" : m5_tbull ? "BULL_TREND" : m5_tbear ? "BEAR_TREND" : "NEUTRAL"
+    _mtf_h1  = h1_bull ? "BULL" : h1_bear ? "BEAR" : "NEUTRAL"
+    _mtf_m15 = m15_bull ? "BULL" : m15_bear ? "BEAR" : "NEUTRAL"
+    _mtf_m5  = m5_bull ? "BULL" : m5_bear ? "BEAR" : "NEUTRAL"
 
     payload  = '{"webhook_secret":"' + WEBHOOK_SECRET + '",'
     payload += '"session":"' + sessionLabel + '",'

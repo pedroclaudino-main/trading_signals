@@ -81,59 +81,27 @@ isDisplacement(offset) =>
 hasVolume() => not useVolFilter or (volume > volSma * volMultiplier)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MULTI-TIMEFRAME — corrigido (idêntico ao indicador v3)
+// MULTI-TIMEFRAME — trend direction only (close vs EMA)
+// Validação estrutural (OB + FVG) fica exclusivamente no 1m.
+// HTFs confirmam apenas direcção macro para não bloquear setups válidos.
 // ═══════════════════════════════════════════════════════════════════════════
 mtf_trend_bull(emaLen) => close > ta.ema(close, emaLen)
 mtf_trend_bear(emaLen) => close < ta.ema(close, emaLen)
-mtf_has_bull_fvg() => low > high[2] or low[1] > high[3]
-mtf_has_bear_fvg() => high < low[2] or high[1] < low[3]
-
-mtf_has_bull_ob() =>
-    ob1 = close[1] < open[1] and close > open and (close - open) > (high[1] - low[1]) * 1.0
-    ob2 = close[2] < open[2] and close[1] > open[1] and (close[1] - open[1]) > (high[2] - low[2]) * 1.0
-    ob1 or ob2
-
-mtf_has_bear_ob() =>
-    ob1 = close[1] > open[1] and close < open and (open - close) > (high[1] - low[1]) * 1.0
-    ob2 = close[2] > open[2] and close[1] < open[1] and (open[1] - close[1]) > (high[2] - low[2]) * 1.0
-    ob1 or ob2
 
 d_bull  = request.security(syminfo.tickerid, "D",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
 d_bear  = request.security(syminfo.tickerid, "D",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 h4_bull = request.security(syminfo.tickerid, "240",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
 h4_bear = request.security(syminfo.tickerid, "240",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h1_bull = request.security(syminfo.tickerid, "60",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+h1_bear = request.security(syminfo.tickerid, "60",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m15_bull = request.security(syminfo.tickerid, "15",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m15_bear = request.security(syminfo.tickerid, "15",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m5_bull  = request.security(syminfo.tickerid, "5",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
+m5_bear  = request.security(syminfo.tickerid, "5",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 
-[h1_tbull, h1_tbear, h1_bfvg, h1_sfvg, h1_bob, h1_sob] = request.security(
-     syminfo.tickerid, "60",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-h1_bull_ok = h1_tbull and h1_bfvg and h1_bob
-h1_bear_ok = h1_tbear and h1_sfvg and h1_sob
-
-[m15_tbull, m15_tbear, m15_bfvg, m15_sfvg, m15_bob, m15_sob] = request.security(
-     syminfo.tickerid, "15",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-m15_bull_ok = m15_tbull and m15_bfvg and m15_bob
-m15_bear_ok = m15_tbear and m15_sfvg and m15_sob
-
-[m5_tbull, m5_tbear, m5_bfvg, m5_sfvg, m5_bob, m5_sob] = request.security(
-     syminfo.tickerid, "5",
-     [mtf_trend_bull(mtfEmaLen), mtf_trend_bear(mtfEmaLen),
-      mtf_has_bull_fvg(), mtf_has_bear_fvg(),
-      mtf_has_bull_ob(),  mtf_has_bear_ob()],
-     lookahead=barmerge.lookahead_off)
-m5_bull_ok = m5_tbull and m5_bfvg and m5_bob
-m5_bear_ok = m5_tbear and m5_sfvg and m5_sob
-
-// 1D, 4H, 1H: full alignment obrigatório (trend + FVG + OB)
-// 15m, 5m: apenas trend (micro-correções não invalidam o setup macro)
-mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull_ok and m15_tbull and m5_tbull)
-mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear_ok and m15_tbear and m5_tbear)
+// Todos os TFs devem apontar na mesma direcção (trend only)
+mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull and m15_bull and m5_bull)
+mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear and m15_bear and m5_bear)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORDER BLOCK (1m) — com historial de 2 OBs
