@@ -356,7 +356,7 @@ app.post("/webhook", async (req, res) => {
   if (!session || typeof current_price !== "number")
     return res.status(400).json({ error: "session e current_price são obrigatórios" });
 
-  if (!["14:45", "15:45", "16:45"].includes(session))
+  if (!["14:30", "15:30", "16:30", "14:45", "15:45", "16:45"].includes(session))
     return res.status(400).json({ error: `session inválida: ${session}` });
 
   if (!Array.isArray(candles_1m) || candles_1m.length < 1)
