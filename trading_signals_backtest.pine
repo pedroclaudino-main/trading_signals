@@ -46,8 +46,9 @@ useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                  
 useVolFilter  = input.bool (true, "Filtro: Volume acima média",                        group="Filtros")
 volMultiplier = input.float(1.2,  "Volume Min (× SMA20)",      minval=1.0, maxval=3.0, group="Filtros")
 maxSignalsSes = input.int  (1,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
-maxFvgObDist  = input.float(30.0, "FVG-OB Max Distância (pts)", minval=5.0, maxval=100.0, group="Filtros")
-minRejectBody = input.float(0.4,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
+maxFvgObDist  = input.float(60.0, "FVG-OB Max Distância (pts)", minval=5.0, maxval=150.0, group="Filtros")
+minRejectBody = input.float(0.3,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
+maxSwingAge   = input.int  (50,   "Swing Max Age (barras)",       minval=10,  maxval=200,  group="Filtros")
 
 useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
 mtfEmaLen     = input.int  (20,   "MTF EMA Period",  minval=5,   maxval=50,            group="Multi-Timeframe")
@@ -192,10 +193,6 @@ if bearBreakValid
 sessionEnded = not inSession and inSession[1]
 if sessionEnded
     bias := "NONE", biasBar := -999
-    bullOB_high := na,  bullOB_low := na,  bullOB_broken := false
-    bearOB_high := na,  bearOB_low := na,  bearOB_broken := false
-    bullOB2_high := na, bullOB2_low := na, bullOB2_broken := false
-    bearOB2_high := na, bearOB2_low := na, bearOB2_broken := false
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FVG DETECTION — filtro duplo
@@ -237,7 +234,6 @@ swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
 swingLow  = ta.pivotlow (low,  swingLookback, swingLookback)
 var float lastSwingHigh = na, var float lastSwingLow = na
 var int   swingHighBar  = na, var int   swingLowBar  = na
-maxSwingAge = input.int(50, "Swing Max Age (barras)", minval=10, maxval=200, group="Filtros")
 
 if not na(swingHigh)
     lastSwingHigh := swingHigh
