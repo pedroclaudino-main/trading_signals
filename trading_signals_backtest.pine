@@ -46,7 +46,6 @@ useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                  
 useVolFilter  = input.bool (true, "Filtro: Volume acima média",                        group="Filtros")
 volMultiplier = input.float(1.2,  "Volume Min (× SMA20)",      minval=1.0, maxval=3.0, group="Filtros")
 maxSignalsSes = input.int  (1,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
-maxFvgObDist  = input.float(60.0, "FVG-OB Max Distância (pts)", minval=5.0, maxval=150.0, group="Filtros")
 minRejectBody = input.float(0.3,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
 maxSwingAge   = input.int  (50,   "Swing Max Age (barras)",       minval=10,  maxval=200,  group="Filtros")
 
@@ -99,9 +98,10 @@ m15_bear = request.security(syminfo.tickerid, "15",  mtf_trend_bear(mtfEmaLen), 
 m5_bull  = request.security(syminfo.tickerid, "5",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
 m5_bear  = request.security(syminfo.tickerid, "5",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 
-// Todos os TFs devem apontar na mesma direcção (trend only)
-mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull and m15_bull and m5_bull)
-mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear and m15_bear and m5_bear)
+// Macro direction: 1D + 4H devem apontar na mesma direcção
+// 1H/15m/5m são demasiado ruidosos — micro-pullbacks bloqueiam setups válidos
+mtfBullOK = not useMTF or (d_bull and h4_bull)
+mtfBearOK = not useMTF or (d_bear and h4_bear)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORDER BLOCK (1m) — com historial de 2 OBs
@@ -226,18 +226,14 @@ bullFvgPostBias = not na(bullFVG_bar) and bullFVG_bar > biasBar
 bearFvgPostBias = not na(bearFVG_bar) and bearFVG_bar > biasBar
 biasDelay       = bar_index >= biasBar + 2
 
-// Proximidade FVG-OB: o FVG deve estar perto do OB que gerou o bias
-bullFvgNearOB = not na(bullOB_high) and math.abs(bullFVG_bottom - bullOB_high) <= maxFvgObDist
-bearFvgNearOB = not na(bearOB_low) and math.abs(bearFVG_top - bearOB_low) <= maxFvgObDist
-
 // Volume exigido no break (já aplicado), mas NÃO no touch (retração saudável tem volume menor)
 touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
-               and bullFvgPostBias and biasDelay and bullFvgNearOB
+               and bullFvgPostBias and biasDelay
                and low <= bullFVG_top and low >= bullFVG_bottom
                and mtfBullOK
 
 touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
-               and bearFvgPostBias and biasDelay and bearFvgNearOB
+               and bearFvgPostBias and biasDelay
                and high >= bearFVG_bottom and high <= bearFVG_top
                and mtfBearOK
 
