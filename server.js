@@ -413,6 +413,21 @@ app.post("/webhook", async (req, res) => {
       };
     }
 
+    // Filtrar sinais com confiança LOW — não enviar alerta
+    if (signal.signal !== "NO_TRADE" && (signal.confidence || "").toUpperCase() === "LOW") {
+      log("INFO", "FILTER", "Signal com confiança LOW filtrado — não enviado", {
+        signal: signal.signal, reason: signal.reason, confidence: signal.confidence,
+      });
+      signal = {
+        signal: "NO_TRADE", reason: `Confiança LOW — signal ${signal.signal} filtrado`,
+        entry: null, sl: null, tp: null, risk_pts: null,
+        rr: null, broken_ob_direction: signal.broken_ob_direction || "NONE",
+        fvg_touched: signal.fvg_touched || "NONE",
+        confidence: "LOW", no_trade_reason: "low_confidence_filtered",
+        mtf_aligned: signal.mtf_aligned || false,
+      };
+    }
+
     let telegramResult = null;
     if (signal.signal !== "NO_TRADE") {
       try {

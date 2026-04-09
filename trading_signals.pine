@@ -19,6 +19,8 @@ useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                  
 useVolFilter  = input.bool (true, "Filtro: Volume acima média",                        group="Filtros")
 volMultiplier = input.float(1.2,  "Volume Min (× SMA20)",      minval=1.0, maxval=3.0, group="Filtros")
 maxSignalsSes = input.int  (1,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
+maxFvgObDist  = input.float(30.0, "FVG-OB Max Distância (pts)", minval=5.0, maxval=100.0, group="Filtros")
+minRejectBody = input.float(0.4,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
 
 // Multi-Timeframe
 useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
@@ -122,8 +124,10 @@ m5_bull_ok = m5_tbull and m5_bfvg and m5_bob
 m5_bear_ok = m5_tbear and m5_sfvg and m5_sob
 
 // ── Consolidação ─────────────────────────────────────────────────────────
-mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull_ok and m15_bull_ok and m5_bull_ok)
-mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear_ok and m15_bear_ok and m5_bear_ok)
+// 1D, 4H, 1H: full alignment obrigatório (trend + FVG + OB)
+// 15m, 5m: apenas trend (micro-correções não invalidam o setup macro)
+mtfBullOK = not useMTF or (d_bull and h4_bull and h1_bull_ok and m15_tbull and m5_tbull)
+mtfBearOK = not useMTF or (d_bear and h4_bear and h1_bear_ok and m15_tbear and m5_tbear)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORDER BLOCK DETECTION (1m) — com historial de 2 OBs
@@ -192,6 +196,10 @@ if bearBreakValid
 sessionEnded = not inSession and inSession[1]
 if sessionEnded
     bias := "NONE",  biasBar := -999
+    bullOB_high := na,  bullOB_low := na,  bullOB_broken := false
+    bearOB_high := na,  bearOB_low := na,  bearOB_broken := false
+    bullOB2_high := na, bullOB2_low := na, bullOB2_broken := false
+    bearOB2_high := na, bearOB2_low := na, bearOB2_broken := false
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FVG DETECTION — filtro duplo (relativo + absoluto)
@@ -252,25 +260,33 @@ plot(swingHigh, "Swing High", color.new(color.red,   40), 2, plot.style_cross, o
 plot(swingLow,  "Swing Low",  color.new(color.green, 40), 2, plot.style_cross, offset=-swingLookback)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FVG TOUCH — rejeição forte + volume + limite por sessão
+// FVG TOUCH — rejeição forte + proximidade OB + limite por sessão
 // ═══════════════════════════════════════════════════════════════════════════
 bullFvgPostBias = not na(bullFVG_bar) and bullFVG_bar > biasBar
 bearFvgPostBias = not na(bearFVG_bar) and bearFVG_bar > biasBar
-biasDelay = bar_index > biasBar
+biasDelay = bar_index >= biasBar + 2
 
+// Proximidade FVG-OB: o FVG deve estar perto do OB que gerou o bias
+bullFvgNearOB = not na(bullOB_high) and math.abs(bullFVG_bottom - bullOB_high) <= maxFvgObDist
+bearFvgNearOB = not na(bearOB_low) and math.abs(bearFVG_top - bearOB_low) <= maxFvgObDist
+
+// Volume exigido no break (já aplicado), mas NÃO no touch (retração saudável tem volume menor)
 touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
-               and bullFvgPostBias and biasDelay
+               and bullFvgPostBias and biasDelay and bullFvgNearOB
                and low <= bullFVG_top and low >= bullFVG_bottom
-               and mtfBullOK and hasVolume()
+               and mtfBullOK
 
 touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
-               and bearFvgPostBias and biasDelay
+               and bearFvgPostBias and biasDelay and bearFvgNearOB
                and high >= bearFVG_bottom and high <= bearFVG_top
-               and mtfBearOK and hasVolume()
+               and mtfBearOK
 
-// FIX: Rejeição forte — close deve SAIR do FVG na direção do bias
-bullReject = not useFvgReject or (close > open and close > bullFVG_top)
-bearReject = not useFvgReject or (close < open and close < bearFVG_bottom)
+// Rejeição forte — close sai do FVG + corpo mínimo (% do range da vela)
+candleRange = high - low
+candleBody  = math.abs(close - open)
+bodyRatio   = candleRange > 0 ? candleBody / candleRange : 0.0
+bullReject = not useFvgReject or (close > open and close > bullFVG_top and bodyRatio >= minRejectBody)
+bearReject = not useFvgReject or (close < open and close < bearFVG_bottom and bodyRatio >= minRejectBody)
 
 if touchesBullFVG
     bullFVG_active := false
