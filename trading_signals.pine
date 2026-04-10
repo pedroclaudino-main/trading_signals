@@ -1,5 +1,5 @@
 //@version=6
-indicator("Trading Signals v3", overlay=true, max_bars_back=500, max_labels_count=200)
+indicator("Trading Signals v4", overlay=true, max_bars_back=500, max_labels_count=200)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INPUTS
@@ -8,21 +8,19 @@ var string WEBHOOK_URL    = input.string("https://trading-signals.up.railway.app
 var string WEBHOOK_SECRET = input.string("", "Webhook Secret")
 
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
-obStrength    = input.float(1.0,  "OB Strength (multiplier)", minval=0.5, maxval=3.0, group="Estratégia")
-maxRiskPts    = input.float(60.0, "Max Risk (pontos)",         minval=10.0,            group="Estratégia")
+maxRiskPts    = input.float(50.0, "Max Risk (pontos)",         minval=5.0,             group="Estratégia")
 
 atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxval=50,  group="Filtros")
-minFvgMult    = input.float(0.05, "FVG Min Size (× ATR)",      minval=0.01,maxval=1.0, group="Filtros")
-minFvgAbs     = input.float(1.0,  "FVG Min Size (pts abs)",    minval=0.5, maxval=10.0,group="Filtros")
-useDispFilter = input.bool (true, "Filtro: Deslocamento OB",                           group="Filtros")
-useFvgReject  = input.bool (true, "Filtro: Rejeição no FVG",                           group="Filtros")
-useVolFilter  = input.bool (true, "Filtro: Volume acima média",                        group="Filtros")
-volMultiplier = input.float(1.2,  "Volume Min (× SMA20)",      minval=1.0, maxval=3.0, group="Filtros")
-maxSignalsSes = input.int  (1,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
-minRejectBody = input.float(0.2,  "Rejeição Corpo Min (% range)", minval=0.1, maxval=0.8, group="Filtros")
-maxSwingAge   = input.int  (50,   "Swing Max Age (barras)",       minval=10,  maxval=200,  group="Filtros")
+useVolFilter  = input.bool (false, "Filtro: Volume acima média",                       group="Filtros")
+volMultiplier = input.float(1.0,  "Volume Min (× SMA20)",      minval=0.5, maxval=3.0, group="Filtros")
+maxSignalsSes = input.int  (2,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
+maxSwingAge   = input.int  (80,   "Swing Max Age (barras)",    minval=10,  maxval=300,  group="Filtros")
 
-// Multi-Timeframe
+// Momentum (blackcat1402)
+momPullback   = input.float(40.0, "Momentum Pullback Zone",    minval=10,  maxval=50,  group="Momentum")
+momOverbought = input.float(60.0, "Momentum Overbought Zone",  minval=50,  maxval=90,  group="Momentum")
+momLookback   = input.int  (5,    "Momentum Lookback (barras)",minval=2,   maxval=15,  group="Momentum")
+
 useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
 mtfEmaLen     = input.int  (20,   "MTF EMA Period",  minval=5,   maxval=50,            group="Multi-Timeframe")
 
@@ -37,8 +35,8 @@ sessionLabel = inSession1 ? "14:30" : inSession2 ? "15:30" : inSession3 ? "16:30
 
 bgcolor(inSession ? color.new(color.blue, 92) : na, title="Session Window")
 
-// Track session transitions for signal-per-session limit
 sessionStarted = inSession and not inSession[1]
+sessionEnded   = not inSession and inSession[1]
 var int signalsThisSession = 0
 if sessionStarted
     signalsThisSession := 0
@@ -48,26 +46,27 @@ if sessionStarted
 // ═══════════════════════════════════════════════════════════════════════════
 roundTick(x) => math.round(x * 4) / 4
 
-atr = ta.atr(atrLen)
+atr    = ta.atr(atrLen)
 volSma = ta.sma(volume, 20)
-
-isDisplacement(offset) =>
-    r = high[offset] - low[offset]
-    b = math.abs(close[offset] - open[offset])
-    r >= atr * 0.5 and b >= r * 0.5
-
 hasVolume() => not useVolFilter or (volume > volSma * volMultiplier)
 
-// ── Momentum Score (inspirado blackcat1402 Swing Trade Oscillator) ────────
-// Weighted price normalizado 0-100, com zonas oversold/overbought
-wp        = (2 * close + high + low + open) / 5.0
+// ═══════════════════════════════════════════════════════════════════════════
+// MOMENTUM OSCILLATOR (blackcat1402 L1 Swing Trade Oscillator)
+// ═══════════════════════════════════════════════════════════════════════════
+wp        = (2.0 * close + high + low + open) / 5.0
 wpHigh    = ta.highest(wp, 25)
 wpLow     = ta.lowest(wp, 11)
-momentum  = wpHigh != wpLow ? (wp - wpLow) / (wpHigh - wpLow) * 100 : 50
+momentum  = wpHigh != wpLow ? (wp - wpLow) / (wpHigh - wpLow) * 100.0 : 50.0
 momSmooth = ta.ema(momentum, 5)
 
-// ── Institutional Bias (inspirado blackcat1402 Bias Scalper) ──────────────
-// SMA crossovers multi-período: se SMAs curtas > longas = institutional push
+momWasLow  = ta.lowest(momSmooth, momLookback) < momPullback
+momWasHigh = ta.highest(momSmooth, momLookback) > momOverbought
+momRising  = momSmooth > momSmooth[1] and momSmooth > momSmooth[2]
+momFalling = momSmooth < momSmooth[1] and momSmooth < momSmooth[2]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SMA TREND ALIGNMENT (blackcat1402 L2/L3 Bias Scalper)
+// ═══════════════════════════════════════════════════════════════════════════
 sma3  = ta.sma(close, 3)
 sma10 = ta.sma(close, 10)
 sma20 = ta.sma(close, 20)
@@ -75,9 +74,7 @@ instBullish = sma3 > sma10 and sma10 > sma20
 instBearish = sma3 < sma10 and sma10 < sma20
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MULTI-TIMEFRAME — trend direction only (close vs EMA)
-// Validação estrutural (OB + FVG) fica exclusivamente no 1m.
-// HTFs confirmam apenas direcção macro para não bloquear setups válidos.
+// MULTI-TIMEFRAME — apenas 1D
 // ═══════════════════════════════════════════════════════════════════════════
 mtf_trend_bull(emaLen) => close > ta.ema(close, emaLen)
 mtf_trend_bear(emaLen) => close < ta.ema(close, emaLen)
@@ -86,123 +83,12 @@ d_bull  = request.security(syminfo.tickerid, "D",   mtf_trend_bull(mtfEmaLen), l
 d_bear  = request.security(syminfo.tickerid, "D",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 h4_bull = request.security(syminfo.tickerid, "240",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
 h4_bear = request.security(syminfo.tickerid, "240",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
-h1_bull = request.security(syminfo.tickerid, "60",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
-h1_bear = request.security(syminfo.tickerid, "60",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
-m15_bull = request.security(syminfo.tickerid, "15",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
-m15_bear = request.security(syminfo.tickerid, "15",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
-m5_bull  = request.security(syminfo.tickerid, "5",   mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
-m5_bear  = request.security(syminfo.tickerid, "5",   mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 
-// Macro direction: 1D + 4H devem apontar na mesma direcção
-// 1H/15m/5m são demasiado ruidosos — micro-pullbacks bloqueiam setups válidos
-mtfBullOK = not useMTF or (d_bull and h4_bull)
-mtfBearOK = not useMTF or (d_bear and h4_bear)
+mtfBullOK = not useMTF or d_bull
+mtfBearOK = not useMTF or d_bear
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ORDER BLOCK DETECTION (1m) — com historial de 2 OBs
-// ═══════════════════════════════════════════════════════════════════════════
-isBullishOB(i) =>
-    bearish     = close[i]   < open[i]
-    bullishNext = close[i-1] > open[i-1]
-    momentum    = (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
-    hasDisp     = useDispFilter ? isDisplacement(i-1) : true
-    bearish and bullishNext and momentum and hasDisp
-
-isBearishOB(i) =>
-    bullish     = close[i]   > open[i]
-    bearishNext = close[i-1] < open[i-1]
-    momentum    = (open[i-1] - close[i-1]) > (high[i] - low[i]) * obStrength
-    hasDisp     = useDispFilter ? isDisplacement(i-1) : true
-    bullish and bearishNext and momentum and hasDisp
-
-// Primary + Secondary OBs
-var float  bullOB_high   = na,  var float  bullOB_low    = na
-var float  bearOB_high   = na,  var float  bearOB_low    = na
-var bool   bullOB_broken = false, var bool   bearOB_broken = false
-
-var float  bullOB2_high   = na, var float  bullOB2_low    = na
-var float  bearOB2_high   = na, var float  bearOB2_low    = na
-var bool   bullOB2_broken = false, var bool   bearOB2_broken = false
-
-var string bias    = "NONE"
-var int    biasBar = -999
-
-if isBullishOB(1)
-    bullOB2_high := bullOB_high,  bullOB2_low := bullOB_low
-    bullOB2_broken := bullOB_broken
-    bullOB_high := high[1],  bullOB_low := low[1]
-    bullOB_broken := false
-
-if isBearishOB(1)
-    bearOB2_high := bearOB_high,  bearOB2_low := bearOB_low
-    bearOB2_broken := bearOB_broken
-    bearOB_high := high[1],  bearOB_low := low[1]
-    bearOB_broken := false
-
-// Break detection — primary + secondary, with volume
-bullBreakNow  = not bullOB_broken  and not na(bullOB_high)  and close > bullOB_high
-bullBreak2Now = not bullOB2_broken and not na(bullOB2_high) and close > bullOB2_high
-bearBreakNow  = not bearOB_broken  and not na(bearOB_low)   and close < bearOB_low
-bearBreak2Now = not bearOB2_broken and not na(bearOB2_low)  and close < bearOB2_low
-
-bullBreakValid = (bullBreakNow or bullBreak2Now) and hasVolume()
-bearBreakValid = (bearBreakNow or bearBreak2Now) and hasVolume()
-
-if bullBreakNow
-    bullOB_broken := true
-if bullBreak2Now
-    bullOB2_broken := true
-if bearBreakNow
-    bearOB_broken := true
-if bearBreak2Now
-    bearOB2_broken := true
-
-if bullBreakValid
-    bias := "BULLISH",  biasBar := bar_index
-if bearBreakValid
-    bias := "BEARISH",  biasBar := bar_index
-
-// Bias persiste durante toda a sessão contínua — só reseta no fim do dia
-sessionEnded = not inSession and inSession[1]
-isNewTradingDay = ta.change(time("D")) != 0
-if isNewTradingDay
-    bias := "NONE",  biasBar := -999
-
-// ═══════════════════════════════════════════════════════════════════════════
-// FVG DETECTION — filtro duplo (relativo + absoluto)
-// ═══════════════════════════════════════════════════════════════════════════
-fvgMinSize = math.max(atr * minFvgMult, minFvgAbs)
-
-var float bullFVG_top = na, var float bullFVG_bottom = na
-var int   bullFVG_bar = na, var bool  bullFVG_active = false
-var float bearFVG_top = na, var float bearFVG_bottom = na
-var int   bearFVG_bar = na, var bool  bearFVG_active = false
-var box lastBullBox = na,   var box lastBearBox = na
-
-newBullFVG = low[0] > high[2] and (low[0] - high[2]) >= fvgMinSize
-newBearFVG = high[0] < low[2] and (low[2] - high[0]) >= fvgMinSize
-
-if newBullFVG
-    bullFVG_top := low[0],  bullFVG_bottom := high[2]
-    bullFVG_bar := bar_index,  bullFVG_active := true
-    box.delete(lastBullBox)
-    lastBullBox := box.new(bar_index - 2, bullFVG_top, bar_index + 40, bullFVG_bottom,
-                            border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 88))
-
-if newBearFVG
-    bearFVG_top := low[2],  bearFVG_bottom := high[0]
-    bearFVG_bar := bar_index,  bearFVG_active := true
-    box.delete(lastBearBox)
-    lastBearBox := box.new(bar_index - 2, bearFVG_top, bar_index + 40, bearFVG_bottom,
-                            border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 88))
-
-if bullFVG_active and (bar_index - bullFVG_bar) > 40
-    bullFVG_active := false,  box.delete(lastBullBox)
-if bearFVG_active and (bar_index - bearFVG_bar) > 40
-    bearFVG_active := false,  box.delete(lastBearBox)
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SWING POINTS
+// SWING POINTS — para SL placement
 // ═══════════════════════════════════════════════════════════════════════════
 swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
 swingLow  = ta.pivotlow (low,  swingLookback, swingLookback)
@@ -216,7 +102,6 @@ if not na(swingLow)
     lastSwingLow := swingLow
     swingLowBar  := bar_index
 
-// Expirar swings demasiado antigos
 if not na(swingHighBar) and (bar_index - swingHighBar) > maxSwingAge
     lastSwingHigh := na
 if not na(swingLowBar) and (bar_index - swingLowBar) > maxSwingAge
@@ -226,41 +111,51 @@ plot(swingHigh, "Swing High", color.new(color.red,   40), 2, plot.style_cross, o
 plot(swingLow,  "Swing Low",  color.new(color.green, 40), 2, plot.style_cross, offset=-swingLookback)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FVG TOUCH — rejeição forte + proximidade OB + limite por sessão
+// ORDER BLOCKS — contexto para webhook (não gatekeep entries)
 // ═══════════════════════════════════════════════════════════════════════════
-// FVGs são válidos independentemente de quando formaram vs OB break
-// Bias delay reduzido a 1 barra (confirmação mínima)
-biasDelay = bar_index >= biasBar + 1
+obStrength = input.float(1.0, "OB Strength", minval=0.5, maxval=3.0, group="Contexto ICT")
 
-touchesBullFVG = bias == "BULLISH" and bullFVG_active and not newBullFVG
-               and biasDelay
-               and low <= bullFVG_top and low >= bullFVG_bottom
-               and mtfBullOK
+isBullishOB(i) =>
+    close[i] < open[i] and close[i-1] > open[i-1] and
+    (close[i-1] - open[i-1]) > (high[i] - low[i]) * obStrength
 
-touchesBearFVG = bias == "BEARISH" and bearFVG_active and not newBearFVG
-               and biasDelay
-               and high >= bearFVG_bottom and high <= bearFVG_top
-               and mtfBearOK
+isBearishOB(i) =>
+    close[i] > open[i] and close[i-1] < open[i-1] and
+    (open[i-1] - close[i-1]) > (high[i] - low[i]) * obStrength
 
-// Rejeição forte — close sai do FVG + corpo mínimo (% do range da vela)
-candleRange = high - low
-candleBody  = math.abs(close - open)
-bodyRatio   = candleRange > 0 ? candleBody / candleRange : 0.0
-bullReject = not useFvgReject or (close > open and close > bullFVG_top and bodyRatio >= minRejectBody)
-bearReject = not useFvgReject or (close < open and close < bearFVG_bottom and bodyRatio >= minRejectBody)
+var float bullOB_high = na, var float bullOB_low = na
+var float bearOB_high = na, var float bearOB_low = na
+var string obBias = "NONE"
 
-if touchesBullFVG
-    bullFVG_active := false
-if touchesBearFVG
-    bearFVG_active := false
+if isBullishOB(1)
+    bullOB_high := high[1], bullOB_low := low[1]
+if isBearishOB(1)
+    bearOB_high := high[1], bearOB_low := low[1]
 
-longSignal  = inSession and touchesBullFVG and bullReject and not na(lastSwingLow)
-shortSignal = inSession and touchesBearFVG and bearReject and not na(lastSwingHigh)
+if not na(bullOB_high) and close > bullOB_high and hasVolume()
+    obBias := "BULLISH"
+if not na(bearOB_low) and close < bearOB_low and hasVolume()
+    obBias := "BEARISH"
+
+isNewTradingDay = ta.change(time("D")) != 0
+if isNewTradingDay
+    obBias := "NONE"
+
+plotchar(isBullishOB(1), "Bull OB", "▲", location.belowbar, color.lime, size=size.tiny)
+plotchar(isBearishOB(1), "Bear OB", "▼", location.abovebar, color.orange, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION — Momentum Pullback + SMA Trend
+// ═══════════════════════════════════════════════════════════════════════════
+bullishCandle = close > open
+bearishCandle = close < open
+
+longSignal  = inSession and instBullish and momWasLow and momRising and bullishCandle and not na(lastSwingLow) and mtfBullOK
+shortSignal = inSession and instBearish and momWasHigh and momFalling and bearishCandle and not na(lastSwingHigh) and mtfBearOK
 
 if longSignal and shortSignal
-    longSignal := false,  shortSignal := false
+    longSignal := false, shortSignal := false
 
-// Limite de sinais por sessão
 if longSignal and signalsThisSession >= maxSignalsSes
     longSignal := false
 if shortSignal and signalsThisSession >= maxSignalsSes
@@ -270,17 +165,17 @@ if longSignal or shortSignal
     signalsThisSession += 1
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ENTRY / SL / TP (R:R 1:2)
+// ENTRY / SL / TP — R:R 1:2
 // ═══════════════════════════════════════════════════════════════════════════
-longEntry  = longSignal  ? roundTick(bullFVG_top)    : na
-longSL     = longSignal  ? roundTick(lastSwingLow)   : na
-longTP     = longSignal  ? roundTick(bullFVG_top + (bullFVG_top - lastSwingLow) * 2.0) : na
-longRisk   = longSignal  ? bullFVG_top - lastSwingLow : na
+longEntry  = longSignal  ? roundTick(close)           : na
+longSL     = longSignal  ? roundTick(lastSwingLow)    : na
+longTP     = longSignal  ? roundTick(close + (close - lastSwingLow) * 2.0) : na
+longRisk   = longSignal  ? close - lastSwingLow       : na
 
-shortEntry = shortSignal ? roundTick(bearFVG_bottom)  : na
-shortSL    = shortSignal ? roundTick(lastSwingHigh)   : na
-shortTP    = shortSignal ? roundTick(bearFVG_bottom - (lastSwingHigh - bearFVG_bottom) * 2.0) : na
-shortRisk  = shortSignal ? lastSwingHigh - bearFVG_bottom : na
+shortEntry = shortSignal ? roundTick(close)            : na
+shortSL    = shortSignal ? roundTick(lastSwingHigh)    : na
+shortTP    = shortSignal ? roundTick(close - (lastSwingHigh - close) * 2.0) : na
+shortRisk  = shortSignal ? lastSwingHigh - close       : na
 
 validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <= maxRiskPts
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
@@ -294,8 +189,6 @@ plot(validLong  ? longSL     : na, "Long SL",     color.new(color.red,   40), li
 plot(validShort ? shortEntry : na, "Short Entry", color.red,                  linewidth=4, style=plot.style_circles)
 plot(validShort ? shortTP    : na, "Short TP",    color.new(color.red,   40), linewidth=2, style=plot.style_cross)
 plot(validShort ? shortSL    : na, "Short SL",    color.new(color.green, 40), linewidth=2, style=plot.style_cross)
-plot(bullBreakValid ? bullOB_high : na, "Bull OB Break", color.lime,   linewidth=3, style=plot.style_circles)
-plot(bearBreakValid ? bearOB_low  : na, "Bear OB Break", color.orange, linewidth=3, style=plot.style_circles)
 bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na, title="Signal Bar")
 
 if validLong
@@ -304,95 +197,70 @@ if validLong
 if validShort
     label.new(bar_index, shortEntry, text="▼ SHORT\nE " + str.tostring(shortEntry, "#.##") + "\nTP " + str.tostring(shortTP, "#.##") + "\nSL " + str.tostring(shortSL, "#.##"),
               style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
-if bullBreakValid
-    label.new(bar_index, bullOB_high, text="OB✓", style=label.style_label_up, color=color.new(color.lime, 30), textcolor=color.white, size=size.tiny)
-if bearBreakValid
-    label.new(bar_index, bearOB_low, text="OB✓", style=label.style_label_down, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LEGENDA
 // ═══════════════════════════════════════════════════════════════════════════
-var table legend = table.new(position.top_right, 2, 18, bgcolor=color.new(color.black, 80), border_color=color.new(color.gray, 60), border_width=1)
+var table legend = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_color=color.new(color.gray, 60), border_width=1)
 if barstate.islastconfirmedhistory or barstate.islast
-    table.cell(legend, 0, 0,  "LEGENDA",        text_color=color.white,  text_size=size.small, text_halign=text.align_left)
-    table.cell(legend, 1, 0,  "",                text_size=size.small)
-    table.cell(legend, 0, 1,  "● Verde",         text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 1,  "Long Entry",      text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 2,  "● Vermelho",      text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 2,  "Short Entry",     text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 3,  "● Lima",          text_color=color.lime,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 3,  "Bull OB Break",   text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 4,  "● Laranja",       text_color=color.orange, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 4,  "Bear OB Break",   text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
-    table.cell(legend, 1, 5,  "───────",         text_color=color.gray,   text_size=size.tiny)
-    _f = (useDispFilter ? "DISP " : "") + (useFvgReject ? "REJ " : "") + (useVolFilter ? "VOL " : "") + (useMTF ? "MTF" : "")
-    table.cell(legend, 0, 6,  "Filtros:",        text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 6,  _f != "" ? _f : "—", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
-    _biasColor = bias == "BULLISH" ? color.lime : bias == "BEARISH" ? color.orange : color.gray
-    table.cell(legend, 0, 7,  "Bias 1m:",        text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 7,  bias,              text_color=_biasColor,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 8,  "Sinais sessão:",  text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 8,  str.tostring(signalsThisSession) + "/" + str.tostring(maxSignalsSes),
+    table.cell(legend, 0, 0,  "TRADING SIGNALS v4", text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(legend, 1, 0,  "MOM+SMA",            text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
+    table.cell(legend, 0, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 1, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 0, 2,  "Momentum",            text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _momCol = momSmooth > momOverbought ? color.red : momSmooth < momPullback ? color.green : color.yellow
+    table.cell(legend, 1, 2,  str.tostring(momSmooth, "#.#"), text_color=_momCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 3,  "SMA Trend",           text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _trendCol = instBullish ? color.green : instBearish ? color.red : color.gray
+    _trendTxt = instBullish ? "▲ BULL" : instBearish ? "▼ BEAR" : "— FLAT"
+    table.cell(legend, 1, 3,  _trendTxt,             text_color=_trendCol,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 4,  "OB Bias",             text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _obCol = obBias == "BULLISH" ? color.lime : obBias == "BEARISH" ? color.orange : color.gray
+    table.cell(legend, 1, 4,  obBias,                text_color=_obCol,       text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 5,  "MTF 1D",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 5,  d_bull ? "▲ BULL" : d_bear ? "▼ BEAR" : "— FLAT",
+               text_color=d_bull ? color.green : d_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 6,  "Sinais sessão",       text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 6,  str.tostring(signalsThisSession) + "/" + str.tostring(maxSignalsSes),
                text_color=signalsThisSession >= maxSignalsSes ? color.red : color.green, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 9,  "───────",         text_color=color.gray,   text_size=size.tiny)
-    table.cell(legend, 1, 9,  "───────",         text_color=color.gray,   text_size=size.tiny)
-    table.cell(legend, 0, 10, "MTF:",            text_color=color.white,  text_size=size.small, text_halign=text.align_left)
-    table.cell(legend, 1, 10, useMTF ? "ON" : "OFF", text_color=useMTF ? color.green : color.red, text_size=size.small, text_halign=text.align_left)
-    _d   = d_bull   ? "▲" : d_bear   ? "▼" : "—"
-    _h4  = h4_bull  ? "▲" : h4_bear  ? "▼" : "—"
-    _h1  = h1_bull  ? "▲" : h1_bear  ? "▼" : "—"
-    _m15 = m15_bull ? "▲" : m15_bear ? "▼" : "—"
-    _m5  = m5_bull  ? "▲" : m5_bear  ? "▼" : "—"
-    table.cell(legend, 0, 11, "1D",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 11, _d,               text_color=d_bull ? color.green : d_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 12, "4H",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 12, _h4,              text_color=h4_bull ? color.green : h4_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 13, "1H",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 13, _h1,              text_color=h1_bull ? color.green : h1_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 14, "15m",             text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 14, _m15,             text_color=m15_bull ? color.green : m15_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 0, 15, "5m",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 15, _m5,              text_color=m5_bull ? color.green : m5_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    _m1 = bias == "BULLISH" ? "▲ T+I+O" : bias == "BEARISH" ? "▼ T+I+O" : "—"
-    table.cell(legend, 0, 16, "1m",              text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 16, _m1,              text_color=bias == "BULLISH" ? color.green : bias == "BEARISH" ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 7,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 1, 7,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 0, 8,  "● Verde",             text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 8,  "Long Entry",          text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 9,  "● Vermelho",          text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 9,  "Short Entry",         text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 10, "▲ Lima",              text_color=color.lime,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 10, "Bull OB (contexto)",  text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 11, "▼ Laranja",           text_color=color.orange, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 11, "Bear OB (contexto)",  text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
     _volOk = hasVolume()
-    table.cell(legend, 0, 17, "Volume:",         text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(legend, 1, 17, _volOk ? "✓ OK" : "✗ Baixo", text_color=_volOk ? color.green : color.red, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 12, "Volume",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 12, _volOk ? "✓ OK" : "✗ Baixo", text_color=_volOk ? color.green : color.red, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 13, "MTF 4H",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 13, h4_bull ? "▲ BULL" : h4_bear ? "▼ BEAR" : "— FLAT",
+               text_color=h4_bull ? color.green : h4_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DATA WINDOW
 // ═══════════════════════════════════════════════════════════════════════════
-plotchar(inSession,         "In Session", "", location.top,      color.yellow, display=display.data_window)
-plotchar(bullFVG_active,    "Bull FVG",   "", location.abovebar, color.green,  display=display.data_window)
-plotchar(bearFVG_active,    "Bear FVG",   "", location.belowbar, color.red,    display=display.data_window)
-plotchar(bias == "BULLISH", "Bias Bull",  "", location.abovebar, color.lime,   display=display.data_window)
-plotchar(bias == "BEARISH", "Bias Bear",  "", location.belowbar, color.orange, display=display.data_window)
+plotchar(inSession,    "In Session", "", location.top,      color.yellow, display=display.data_window)
+plotchar(instBullish,  "SMA Bull",   "", location.abovebar, color.lime,   display=display.data_window)
+plotchar(instBearish,  "SMA Bear",   "", location.belowbar, color.orange, display=display.data_window)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// WEBHOOK PAYLOAD — agora com dados MTF e volume
+// WEBHOOK PAYLOAD — v4 com momentum + SMA dados
 // ═══════════════════════════════════════════════════════════════════════════
 if (validLong or validShort) and barstate.isconfirmed
     entryPrice = validLong ? longEntry   : shortEntry
     slPrice    = validLong ? longSL      : shortSL
     tpPrice    = validLong ? longTP      : shortTP
     riskPts    = validLong ? longRisk    : shortRisk
-    obHigh     = validLong ? bullOB_high : bearOB_high
-    obLow      = validLong ? bullOB_low  : bearOB_low
-    fvgTop     = validLong ? bullFVG_top    : bearFVG_top
-    fvgBottom  = validLong ? bullFVG_bottom : bearFVG_bottom
-    fvgType    = validLong ? "bullish"   : "bearish"
-    obType     = validLong ? "bullish"   : "bearish"
 
     swingLowStr  = not na(lastSwingLow)  ? str.tostring(lastSwingLow,  "#.##") : "null"
     swingHighStr = not na(lastSwingHigh) ? str.tostring(lastSwingHigh, "#.##") : "null"
 
-    _mtf_d   = d_bull ? "BULL" : d_bear ? "BEAR" : "NEUTRAL"
-    _mtf_h4  = h4_bull ? "BULL" : h4_bear ? "BEAR" : "NEUTRAL"
-    _mtf_h1  = h1_bull ? "BULL" : h1_bear ? "BEAR" : "NEUTRAL"
-    _mtf_m15 = m15_bull ? "BULL" : m15_bear ? "BEAR" : "NEUTRAL"
-    _mtf_m5  = m5_bull ? "BULL" : m5_bear ? "BEAR" : "NEUTRAL"
+    _mtf_d  = d_bull  ? "BULL" : d_bear  ? "BEAR" : "NEUTRAL"
+    _mtf_h4 = h4_bull ? "BULL" : h4_bear ? "BEAR" : "NEUTRAL"
 
     payload  = '{"webhook_secret":"' + WEBHOOK_SECRET + '",'
     payload += '"session":"' + sessionLabel + '",'
@@ -401,10 +269,9 @@ if (validLong or validShort) and barstate.isconfirmed
     payload += '{"o":' + str.tostring(open, "#.##") + ',"h":' + str.tostring(high, "#.##") + ',"l":' + str.tostring(low, "#.##") + ',"c":' + str.tostring(close, "#.##") + ',"v":' + str.tostring(volume, "#") + '},'
     payload += '{"o":' + str.tostring(open[1], "#.##") + ',"h":' + str.tostring(high[1], "#.##") + ',"l":' + str.tostring(low[1], "#.##") + ',"c":' + str.tostring(close[1], "#.##") + ',"v":' + str.tostring(volume[1], "#") + '},'
     payload += '{"o":' + str.tostring(open[2], "#.##") + ',"h":' + str.tostring(high[2], "#.##") + ',"l":' + str.tostring(low[2], "#.##") + ',"c":' + str.tostring(close[2], "#.##") + ',"v":' + str.tostring(volume[2], "#") + '}],'
-    payload += '"broken_ob":{"type":"' + obType + '","high":' + str.tostring(obHigh, "#.##") + ',"low":' + str.tostring(obLow, "#.##") + '},'
-    payload += '"fvgs":[{"type":"' + fvgType + '","top":' + str.tostring(fvgTop, "#.##") + ',"bottom":' + str.tostring(fvgBottom, "#.##") + ',"after_ob_break":true}],'
+    payload += '"ob_bias":"' + obBias + '",'
     payload += '"swings":[{"type":"low","price":' + swingLowStr + '},{"type":"high","price":' + swingHighStr + '}],'
-    payload += '"mtf":{"1d":"' + _mtf_d + '","4h":"' + _mtf_h4 + '","1h":"' + _mtf_h1 + '","15m":"' + _mtf_m15 + '","5m":"' + _mtf_m5 + '"},'
+    payload += '"mtf":{"1d":"' + _mtf_d + '","4h":"' + _mtf_h4 + '"},'
     payload += '"momentum":' + str.tostring(momSmooth, "#.#") + ','
     payload += '"institutional_bias":"' + (instBullish ? "BULLISH" : instBearish ? "BEARISH" : "NEUTRAL") + '",'
     payload += '"suggested_entry":' + str.tostring(entryPrice, "#.##") + ','
