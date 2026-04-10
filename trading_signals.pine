@@ -13,7 +13,7 @@ maxRiskPts    = input.float(50.0, "Max Risk (pontos)",         minval=5.0,      
 atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxval=50,  group="Filtros")
 useVolFilter  = input.bool (false, "Filtro: Volume acima média",                       group="Filtros")
 volMultiplier = input.float(1.0,  "Volume Min (× SMA20)",      minval=0.5, maxval=3.0, group="Filtros")
-maxSignalsSes = input.int  (4,    "Max sinais por sessão",     minval=1,   maxval=10,  group="Filtros")
+maxSignalsSes = input.int  (2,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
 maxSwingAge   = input.int  (80,   "Swing Max Age (barras)",    minval=10,  maxval=300,  group="Filtros")
 
 // Momentum (blackcat1402)
@@ -61,8 +61,8 @@ momSmooth = ta.ema(momentum, 5)
 
 momWasLow  = ta.lowest(momSmooth, momLookback) < momPullback
 momWasHigh = ta.highest(momSmooth, momLookback) > momOverbought
-momRising  = momSmooth > momSmooth[1]
-momFalling = momSmooth < momSmooth[1]
+momRising  = momSmooth > momSmooth[1] and momSmooth > momSmooth[2]
+momFalling = momSmooth < momSmooth[1] and momSmooth < momSmooth[2]
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SMA TREND ALIGNMENT (blackcat1402 L2/L3 Bias Scalper)
@@ -70,8 +70,6 @@ momFalling = momSmooth < momSmooth[1]
 sma3  = ta.sma(close, 3)
 sma10 = ta.sma(close, 10)
 sma20 = ta.sma(close, 20)
-trendBullish = sma3 > sma10
-trendBearish = sma3 < sma10
 instBullish = sma3 > sma10 and sma10 > sma20
 instBearish = sma3 < sma10 and sma10 < sma20
 
@@ -150,8 +148,8 @@ plotchar(isBearishOB(1), "Bear OB", "▼", location.abovebar, color.orange, size
 bullishCandle = close > open
 bearishCandle = close < open
 
-longSignal  = inSession and trendBullish and momWasLow and momRising and bullishCandle and not na(lastSwingLow) and mtfBullOK
-shortSignal = inSession and trendBearish and momWasHigh and momFalling and bearishCandle and not na(lastSwingHigh) and mtfBearOK
+longSignal  = inSession and instBullish and momWasLow and momRising and bullishCandle and not na(lastSwingLow) and mtfBullOK
+shortSignal = inSession and instBearish and momWasHigh and momFalling and bearishCandle and not na(lastSwingHigh) and mtfBearOK
 
 if longSignal and shortSignal
     longSignal := false, shortSignal := false
