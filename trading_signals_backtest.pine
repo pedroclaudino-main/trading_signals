@@ -30,9 +30,9 @@ strategy("Trading_Signals v4 — Backtest", overlay=true, max_bars_back=500,
 // ── Inputs ─────────────────────────────────────────────────────────────────
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
 maxRiskPts    = input.float(50.0, "Max Risk (pontos)",         minval=5.0,             group="Estratégia")
-i_contracts   = input.int  (1,    "Contratos por trade",       minval=1,   maxval=10,  group="Backtest")
-maxDailyTrades= input.int  (4,    "Max trades por dia",        minval=1,   maxval=10,  group="Backtest")
-maxSignalsSes = input.int  (2,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Backtest")
+i_contracts   = input.int  (2,    "Contratos por trade",       minval=1,   maxval=10,  group="Backtest")
+maxDailyTrades= input.int  (8,    "Max trades por dia",        minval=1,   maxval=20,  group="Backtest")
+maxSignalsSes = input.int  (4,    "Max sinais por sessão",     minval=1,   maxval=10,  group="Backtest")
 
 atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxval=50,  group="Filtros")
 useVolFilter  = input.bool (false, "Filtro: Volume acima média",                       group="Filtros")
@@ -84,16 +84,19 @@ momWasLow  = ta.lowest(momSmooth, momLookback) < momPullback
 momWasHigh = ta.highest(momSmooth, momLookback) > momOverbought
 
 // Momentum a reverter (turning): subindo após pullback, descendo após overbought
-momRising  = momSmooth > momSmooth[1] and momSmooth > momSmooth[2]
-momFalling = momSmooth < momSmooth[1] and momSmooth < momSmooth[2]
+momRising  = momSmooth > momSmooth[1]
+momFalling = momSmooth < momSmooth[1]
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SMA TREND ALIGNMENT (blackcat1402 L2/L3 Bias Scalper)
-// SMA3 > SMA10 > SMA20 = institutional bullish push
+// SMA3 > SMA10 = short-term bullish (relaxado para mais sinais)
+// SMA3 > SMA10 > SMA20 = strong trend (usado para confidence no webhook)
 // ═══════════════════════════════════════════════════════════════════════════
 sma3  = ta.sma(close, 3)
 sma10 = ta.sma(close, 10)
 sma20 = ta.sma(close, 20)
+trendBullish = sma3 > sma10
+trendBearish = sma3 < sma10
 instBullish = sma3 > sma10 and sma10 > sma20
 instBearish = sma3 < sma10 and sma10 < sma20
 
@@ -177,8 +180,9 @@ plotchar(isBearishOB(1), "Bear OB", "▼", location.abovebar, color.orange, size
 bullishCandle = close > open
 bearishCandle = close < open
 
-longSignal  = inSession and instBullish and momWasLow and momRising and bullishCandle and not na(lastSwingLow) and mtfBullOK
-shortSignal = inSession and instBearish and momWasHigh and momFalling and bearishCandle and not na(lastSwingHigh) and mtfBearOK
+// trendBullish (SMA3>SMA10) para entrada, instBullish (full alignment) eleva confidence
+longSignal  = inSession and trendBullish and momWasLow and momRising and bullishCandle and not na(lastSwingLow) and mtfBullOK
+shortSignal = inSession and trendBearish and momWasHigh and momFalling and bearishCandle and not na(lastSwingHigh) and mtfBearOK
 
 if longSignal and shortSignal
     longSignal := false, shortSignal := false
