@@ -4,6 +4,7 @@ const crypto    = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 const fs        = require("fs");
 const path      = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 // ── Variáveis de ambiente ───────────────────────────────────────────────────
 const ANTHROPIC_API_KEY  = process.env.ANTHROPIC_API_KEY;
@@ -12,6 +13,8 @@ const TELEGRAM_CHAT_IDS  = (process.env.TELEGRAM_CHAT_ID || "").split(",").map(s
 const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET;
 const NOTIFY_NO_TRADE    = (process.env.NOTIFY_NO_TRADE || "false") === "true";
 const JOURNAL_PATH       = process.env.JOURNAL_PATH || "./trade_journal.jsonl";
+const SUPABASE_URL       = process.env.SUPABASE_URL;
+const SUPABASE_KEY       = process.env.SUPABASE_KEY;
 
 if (!ANTHROPIC_API_KEY) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "FATAL", msg: "ANTHROPIC_API_KEY não definida" }));
@@ -19,6 +22,15 @@ if (!ANTHROPIC_API_KEY) {
 }
 if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
   log("WARN", "STARTUP", "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não definidos — alertas Telegram desativados");
+}
+
+// ── Supabase (persistent journal) ─────────────────────────────────────────
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  log("INFO", "STARTUP", "Supabase configured — journal will persist to PostgreSQL");
+} else {
+  log("WARN", "STARTUP", "SUPABASE_URL/SUPABASE_KEY not set — journal falls back to local JSONL (ephemeral on Railway)");
 }
 
 // ── Logging estruturado ────────────────────────────────────────────────────
@@ -114,8 +126,14 @@ function fetchWithTimeout(url, options, timeoutMs = 10000) {
     .finally(() => clearTimeout(timer));
 }
 
-// ── Journal — grava cada sinal num ficheiro JSONL (async) ──────────────────
-function journalSignal(payload, signal, telegramResult) {
+// ── Journal — persists to Supabase with JSONL fallback ────────────────────
+function journalSignalToFile(entry) {
+  fs.appendFile(JOURNAL_PATH, JSON.stringify(entry) + "\n", (err) => {
+    if (err) log("WARN", "JOURNAL", "Erro ao gravar journal local", { error: err.message });
+  });
+}
+
+async function journalSignal(payload, signal, telegramResult) {
   const entry = {
     ts: new Date().toISOString(),
     session: payload.session,
@@ -130,9 +148,31 @@ function journalSignal(payload, signal, telegramResult) {
     mtf: payload.mtf || null,
     telegram_ok: telegramResult?.ok ?? null,
   };
-  fs.appendFile(JOURNAL_PATH, JSON.stringify(entry) + "\n", (err) => {
-    if (err) log("WARN", "JOURNAL", "Erro ao gravar journal", { error: err.message });
-  });
+
+  if (supabase) {
+    const { error } = await supabase.from("signals").insert({
+      ts: entry.ts,
+      session: entry.session,
+      price: entry.price,
+      signal: entry.signal,
+      entry: entry.entry,
+      sl: entry.sl,
+      tp: entry.tp,
+      risk_pts: entry.risk_pts,
+      confidence: entry.confidence,
+      reason: entry.reason,
+      mtf: entry.mtf,
+      telegram_ok: entry.telegram_ok,
+    });
+    if (error) {
+      log("ERROR", "JOURNAL", "Supabase insert failed — falling back to JSONL", { error: error.message });
+      journalSignalToFile(entry);
+    } else {
+      log("INFO", "JOURNAL", "Signal persisted to Supabase");
+    }
+  } else {
+    journalSignalToFile(entry);
+  }
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
@@ -466,26 +506,46 @@ app.post("/webhook", async (req, res) => {
 app.get("/", (req, res) =>
   res.json({
     status:       "online",
-    version:      "v3",
+    version:      "v4",
     strategy:     "ICT 1m — OB break + FVG touch, R/R 1:2, volume + MTF",
     telegram:     TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
-    journal:      JOURNAL_PATH,
+    journal:      supabase ? "supabase (persistent)" : `jsonl: ${JOURNAL_PATH} (ephemeral)`,
     notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
   })
 );
 
-// ── Journal viewer (últimos N sinais — leitura parcial para ficheiros grandes)
-app.get("/journal", (req, res) => {
+// ── Journal viewer (últimos N sinais) ─────────────────────────────────────
+app.get("/journal", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+
+  // Try Supabase first
+  if (supabase) {
+    const { data, error, count } = await supabase
+      .from("signals")
+      .select("*", { count: "exact" })
+      .order("ts", { ascending: false })
+      .limit(limit);
+
+    if (!error) {
+      return res.json({
+        source: "supabase",
+        total: count,
+        showing: data.length,
+        entries: data.reverse(), // chronological order (oldest first)
+      });
+    }
+    log("WARN", "JOURNAL", "Supabase query failed — falling back to JSONL", { error: error.message });
+  }
+
+  // Fallback: read from local JSONL
   let fd;
   try {
-    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-    if (!fs.existsSync(JOURNAL_PATH)) return res.json({ entries: [] });
+    if (!fs.existsSync(JOURNAL_PATH)) return res.json({ source: "jsonl", entries: [] });
 
     const stat = fs.statSync(JOURNAL_PATH);
-    // Para ficheiros pequenos (<1MB), ler tudo; para grandes, ler só o final
-    const MAX_READ = 1024 * 1024; // 1MB
+    const MAX_READ = 1024 * 1024;
     const readSize = Math.min(stat.size, MAX_READ);
     const buf = Buffer.alloc(readSize);
     fd = fs.openSync(JOURNAL_PATH, "r");
@@ -497,7 +557,7 @@ app.get("/journal", (req, res) => {
     const entries = lines.slice(-limit).map(l => {
       try { return JSON.parse(l); } catch { return null; }
     }).filter(Boolean);
-    res.json({ total: stat.size < MAX_READ ? lines.length : "~" + lines.length, showing: entries.length, entries });
+    res.json({ source: "jsonl", total: stat.size < MAX_READ ? lines.length : "~" + lines.length, showing: entries.length, entries });
   } catch (err) {
     if (fd !== undefined) try { fs.closeSync(fd); } catch {}
     res.status(500).json({ error: "Erro ao ler journal" });
