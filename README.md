@@ -1,6 +1,6 @@
-# MasterSignal v4 — Setup Guide
+# MasterSignal v5 — Setup Guide
 
-Sistema completo de alertas ICT para CME_MINI:MNQ com análise contextual por Claude AI.
+Sistema completo de alertas ICT para CME futures (MNQ, MES, NQ, ES) com análise contextual por Claude AI, position sizing dinâmico, e tuning adaptativo.
 
 ---
 
@@ -39,7 +39,7 @@ Sistema completo de alertas ICT para CME_MINI:MNQ com análise contextual por Cl
 
 ## Arquitetura
 
-TradingView (Pine Script v3) → Webhook Server (Railway) → Claude AI (contexto) → Telegram (iPhone)
+TradingView (Pine Script v4) → Webhook Server (Railway) → Claude AI (contexto) → Position Sizing → Telegram (iPhone)
 
 ---
 
@@ -53,6 +53,11 @@ TradingView (Pine Script v3) → Webhook Server (Railway) → Claude AI (context
    - `TELEGRAM_CHAT_ID` — obrigatório (pode ser múltiplos: `id1,id2`)
    - `WEBHOOK_SECRET` — recomendado
    - `NOTIFY_NO_TRADE` — `true` para debug, `false` em produção
+   - `DEFAULT_INSTRUMENT` — default instrument (default: `MNQ`)
+   - `INSTRUMENT_CONFIG` — JSON override for instrument params (optional)
+   - `ACCOUNT_BALANCE` — funded account balance for position sizing (optional)
+   - `RISK_PER_TRADE_PCT` — risk % per trade (default: `0.5`)
+   - `APEX_SCALE_THRESHOLD` — % of loss limit to start scaling (default: `70`)
 4. Railway dá URL pública: `https://xxx.up.railway.app`
 
 ---
@@ -122,6 +127,81 @@ Suppressed signals are logged in the journal with reason `news_event_suppressed`
 
 ---
 
+## Multi-Instrument Support
+
+Supports multiple CME futures instruments with per-instrument risk parameters. Default: MNQ.
+
+**Supported instruments:** MNQ, MES, NQ, ES
+
+**Configuration:**
+- `DEFAULT_INSTRUMENT` — default instrument when not specified in webhook (default: `MNQ`)
+- `INSTRUMENT_CONFIG` — JSON override for instrument parameters (optional)
+
+**Usage:** Add `"instrument": "ES"` to your webhook payload. Omit for MNQ (backward compatible).
+
+```bash
+# List all instruments and their config
+curl https://SEU-PROJETO.railway.app/instruments
+
+# Risk status per instrument
+curl https://SEU-PROJETO.railway.app/risk-status?instrument=MNQ
+curl https://SEU-PROJETO.railway.app/risk-status  # all instruments
+```
+
+Each instrument has independent daily risk limits, signal counts, and validation parameters.
+
+---
+
+## Position Sizing Engine
+
+Dynamic position sizing based on account balance, risk percentage, confidence level, and Apex compliance.
+
+**Configuration:**
+- `ACCOUNT_BALANCE` — funded account balance in $ (default: `0` = 1 contract fixed)
+- `RISK_PER_TRADE_PCT` — max risk per trade as % of balance (default: `0.5`)
+- `APEX_SCALE_THRESHOLD` — % of daily loss limit to start scaling down (default: `70`)
+
+**Sizing logic:**
+1. Base contracts = `(balance × risk%) / (risk_pts × point_value)`
+2. Confidence adjustment: HIGH=100%, MEDIUM=75%, LOW=50%
+3. Apex scaling: reduces contracts when daily risk exceeds threshold
+4. Minimum: always 1 contract
+
+```bash
+# Check current sizing parameters and examples
+curl https://SEU-PROJETO.railway.app/sizing-status
+curl https://SEU-PROJETO.railway.app/sizing-status?instrument=ES
+```
+
+Telegram alerts now include contract count.
+
+---
+
+## Adaptive Strategy Parameters
+
+Analyze historical trade data to identify optimal strategy parameters and session performance.
+
+```bash
+# Per-session performance (last 30 days)
+curl https://SEU-PROJETO.railway.app/stats/sessions
+curl https://SEU-PROJETO.railway.app/stats/sessions?days=60&instrument=MNQ
+
+# Parameter analysis (R:R, risk, confidence, direction breakdown)
+curl https://SEU-PROJETO.railway.app/stats/parameters
+curl https://SEU-PROJETO.railway.app/stats/parameters?days=30&instrument=ES
+
+# Tuning recommendations
+curl https://SEU-PROJETO.railway.app/tune
+curl https://SEU-PROJETO.railway.app/tune?days=60
+```
+
+Requires at least 20 closed trades for meaningful analysis. Recommendations include:
+- Best/worst performing sessions
+- Confidence filter effectiveness
+- Risk sizing optimization suggestions
+
+---
+
 ## Janelas de trading (hora de Lisboa)
 
 | Janela | Horário Lisboa | Equivalente NY |
@@ -139,6 +219,7 @@ curl -X POST https://SEU-PROJETO.railway.app/webhook \
   -H "Content-Type: application/json" \
   -d '{
     "webhook_secret": "SEU_SECRET",
+    "instrument": "MNQ",
     "session": "15:45",
     "current_price": 19850.25,
     "candles_1m": [
