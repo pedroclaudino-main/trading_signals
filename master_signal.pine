@@ -1,10 +1,10 @@
 //@version=6
-indicator("Trading Signals v4", overlay=true, max_bars_back=500, max_labels_count=200)
+indicator("MasterSignal v4", overlay=true, max_bars_back=500, max_labels_count=200)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INPUTS
 // ═══════════════════════════════════════════════════════════════════════════
-var string WEBHOOK_URL    = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
+var string WEBHOOK_URL    = input.string("https://mastersignal.up.railway.app/webhook", "Webhook URL")
 var string WEBHOOK_SECRET = input.string("", "Webhook Secret")
 
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
@@ -201,7 +201,7 @@ if validShort
 // ═══════════════════════════════════════════════════════════════════════════
 var table legend = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_color=color.new(color.gray, 60), border_width=1)
 if barstate.islastconfirmedhistory or barstate.islast
-    table.cell(legend, 0, 0,  "TRADING SIGNALS v4", text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(legend, 0, 0,  "MASTERSIGNAL v4", text_color=color.white,  text_size=size.small, text_halign=text.align_left)
     table.cell(legend, 1, 0,  "MOM+SMA",            text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
     table.cell(legend, 0, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)
     table.cell(legend, 1, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)

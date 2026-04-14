@@ -4,6 +4,7 @@ const crypto    = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 const fs        = require("fs");
 const path      = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 // ── Variáveis de ambiente ───────────────────────────────────────────────────
 const ANTHROPIC_API_KEY  = process.env.ANTHROPIC_API_KEY;
@@ -12,6 +13,12 @@ const TELEGRAM_CHAT_IDS  = (process.env.TELEGRAM_CHAT_ID || "").split(",").map(s
 const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET;
 const NOTIFY_NO_TRADE    = (process.env.NOTIFY_NO_TRADE || "false") === "true";
 const JOURNAL_PATH       = process.env.JOURNAL_PATH || "./trade_journal.jsonl";
+const SUPABASE_URL       = process.env.SUPABASE_URL;
+const SUPABASE_KEY       = process.env.SUPABASE_KEY;
+
+// Apex Risk Guard config
+const APEX_MAX_DAILY_SIGNALS = parseInt(process.env.APEX_MAX_DAILY_SIGNALS || "10", 10);
+const APEX_DAILY_LOSS_LIMIT  = parseFloat(process.env.APEX_DAILY_LOSS_LIMIT || "150"); // points
 
 if (!ANTHROPIC_API_KEY) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "FATAL", msg: "ANTHROPIC_API_KEY não definida" }));
@@ -21,10 +28,77 @@ if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
   log("WARN", "STARTUP", "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não definidos — alertas Telegram desativados");
 }
 
+// ── Supabase (persistent journal) ─────────────────────────────────────────
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  log("INFO", "STARTUP", "Supabase configured — journal will persist to PostgreSQL");
+} else {
+  log("WARN", "STARTUP", "SUPABASE_URL/SUPABASE_KEY not set — journal falls back to local JSONL (ephemeral on Railway)");
+}
+
 // ── Logging estruturado ────────────────────────────────────────────────────
 function log(level, component, msg, extra = {}) {
   const entry = { ts: new Date().toISOString(), level, component, msg, ...extra };
   (level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log)(JSON.stringify(entry));
+}
+
+// ── Global state ──────────────────────────────────────────────────────────
+let lastError = null;
+
+// ── Apex Risk Guard — daily risk state ────────────────────────────────────
+const dailyRisk = {
+  date: null,           // YYYY-MM-DD in ET
+  signalCount: 0,       // signals sent today
+  totalRiskPts: 0,      // sum of risk_pts for all signals sent today
+  halted: false,        // true if daily limit reached
+  signals: [],          // brief log of today's signals
+};
+
+function getETDate() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+function resetDailyRiskIfNewDay() {
+  const today = getETDate();
+  if (dailyRisk.date !== today) {
+    dailyRisk.date = today;
+    dailyRisk.signalCount = 0;
+    dailyRisk.totalRiskPts = 0;
+    dailyRisk.halted = false;
+    dailyRisk.signals = [];
+    log("INFO", "RISK_GUARD", `Daily risk state reset for ${today}`);
+  }
+}
+
+function checkDailyRiskLimit() {
+  resetDailyRiskIfNewDay();
+  if (dailyRisk.signalCount >= APEX_MAX_DAILY_SIGNALS) {
+    return { blocked: true, reason: `Daily signal limit reached (${dailyRisk.signalCount}/${APEX_MAX_DAILY_SIGNALS})` };
+  }
+  if (dailyRisk.totalRiskPts >= APEX_DAILY_LOSS_LIMIT) {
+    return { blocked: true, reason: `Daily risk exposure limit reached (${dailyRisk.totalRiskPts.toFixed(1)}/${APEX_DAILY_LOSS_LIMIT} pts)` };
+  }
+  return { blocked: false };
+}
+
+function recordSignalRisk(signal) {
+  resetDailyRiskIfNewDay();
+  dailyRisk.signalCount++;
+  dailyRisk.totalRiskPts += typeof signal.risk_pts === "number" ? signal.risk_pts : 0;
+  dailyRisk.signals.push({
+    ts: new Date().toISOString(),
+    signal: signal.signal,
+    risk_pts: signal.risk_pts,
+    entry: signal.entry,
+  });
+  if (dailyRisk.signalCount >= APEX_MAX_DAILY_SIGNALS || dailyRisk.totalRiskPts >= APEX_DAILY_LOSS_LIMIT) {
+    dailyRisk.halted = true;
+    log("WARN", "RISK_GUARD", "Daily limit reached — halting signals", {
+      signalCount: dailyRisk.signalCount,
+      totalRiskPts: dailyRisk.totalRiskPts,
+    });
+  }
 }
 
 // ── Rate Limiting ──────────────────────────────────────────────────────────
@@ -114,8 +188,14 @@ function fetchWithTimeout(url, options, timeoutMs = 10000) {
     .finally(() => clearTimeout(timer));
 }
 
-// ── Journal — grava cada sinal num ficheiro JSONL (async) ──────────────────
-function journalSignal(payload, signal, telegramResult) {
+// ── Journal — persists to Supabase with JSONL fallback ────────────────────
+function journalSignalToFile(entry) {
+  fs.appendFile(JOURNAL_PATH, JSON.stringify(entry) + "\n", (err) => {
+    if (err) log("WARN", "JOURNAL", "Erro ao gravar journal local", { error: err.message });
+  });
+}
+
+async function journalSignal(payload, signal, telegramResult) {
   const entry = {
     ts: new Date().toISOString(),
     session: payload.session,
@@ -130,9 +210,31 @@ function journalSignal(payload, signal, telegramResult) {
     mtf: payload.mtf || null,
     telegram_ok: telegramResult?.ok ?? null,
   };
-  fs.appendFile(JOURNAL_PATH, JSON.stringify(entry) + "\n", (err) => {
-    if (err) log("WARN", "JOURNAL", "Erro ao gravar journal", { error: err.message });
-  });
+
+  if (supabase) {
+    const { error } = await supabase.from("signals").insert({
+      ts: entry.ts,
+      session: entry.session,
+      price: entry.price,
+      signal: entry.signal,
+      entry: entry.entry,
+      sl: entry.sl,
+      tp: entry.tp,
+      risk_pts: entry.risk_pts,
+      confidence: entry.confidence,
+      reason: entry.reason,
+      mtf: entry.mtf,
+      telegram_ok: entry.telegram_ok,
+    });
+    if (error) {
+      log("ERROR", "JOURNAL", "Supabase insert failed — falling back to JSONL", { error: error.message });
+      journalSignalToFile(entry);
+    } else {
+      log("INFO", "JOURNAL", "Signal persisted to Supabase");
+    }
+  } else {
+    journalSignalToFile(entry);
+  }
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
@@ -375,6 +477,31 @@ app.post("/webhook", async (req, res) => {
     ip: clientIp,
   });
 
+  // 6. Apex Risk Guard — check daily limits before processing
+  const riskCheck = checkDailyRiskLimit();
+  if (riskCheck.blocked) {
+    log("WARN", "RISK_GUARD", "Signal blocked by daily risk limit", { reason: riskCheck.reason });
+    const blockedSignal = {
+      signal: "NO_TRADE",
+      reason: `🛑 Apex Risk Guard: ${riskCheck.reason}`,
+      no_trade_reason: "daily_risk_limit",
+      entry: null, sl: null, tp: null, risk_pts: null,
+      confidence: "LOW", mtf_aligned: false,
+    };
+    if (!dailyRisk._alertSent) {
+      dailyRisk._alertSent = true;
+      sendHealthAlert(
+        `🛑 APEX RISK GUARD — Daily Limit Reached\n` +
+        `━━━━━━━━━━━━━━━━━\n` +
+        `📊 ${riskCheck.reason}\n` +
+        `🔒 All signals blocked until midnight ET\n` +
+        `🕐 ${new Date().toISOString()}`
+      ).catch(() => {});
+    }
+    journalSignal(req.body, blockedSignal, null);
+    return res.json({ ok: true, signal: blockedSignal, risk_blocked: true });
+  }
+
   try {
     const payload = JSON.stringify({
       candles_1m, broken_ob, fvgs, swings, mtf,
@@ -435,6 +562,8 @@ app.post("/webhook", async (req, res) => {
 
     let telegramResult = null;
     if (signal.signal !== "NO_TRADE") {
+      // Record risk before sending — Apex Risk Guard
+      recordSignalRisk(signal);
       try {
         telegramResult = await sendTelegram(signal);
       } catch (err) {
@@ -466,26 +595,63 @@ app.post("/webhook", async (req, res) => {
 app.get("/", (req, res) =>
   res.json({
     status:       "online",
-    version:      "v3",
+    version:      "v4",
     strategy:     "ICT 1m — OB break + FVG touch, R/R 1:2, volume + MTF",
     telegram:     TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
-    journal:      JOURNAL_PATH,
+    journal:      supabase ? "supabase (persistent)" : `jsonl: ${JOURNAL_PATH} (ephemeral)`,
     notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
+    last_error:   lastError,
   })
 );
 
-// ── Journal viewer (últimos N sinais — leitura parcial para ficheiros grandes)
-app.get("/journal", (req, res) => {
+// ── Risk status endpoint ──────────────────────────────────────────────────
+app.get("/risk-status", (req, res) => {
+  resetDailyRiskIfNewDay();
+  res.json({
+    date: dailyRisk.date,
+    signals_today: dailyRisk.signalCount,
+    max_daily_signals: APEX_MAX_DAILY_SIGNALS,
+    total_risk_pts: dailyRisk.totalRiskPts,
+    daily_loss_limit_pts: APEX_DAILY_LOSS_LIMIT,
+    halted: dailyRisk.halted,
+    remaining_signals: Math.max(0, APEX_MAX_DAILY_SIGNALS - dailyRisk.signalCount),
+    remaining_risk_pts: Math.max(0, APEX_DAILY_LOSS_LIMIT - dailyRisk.totalRiskPts),
+    signals: dailyRisk.signals,
+  });
+});
+
+// ── Journal viewer (últimos N sinais) ─────────────────────────────────────
+app.get("/journal", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+
+  // Try Supabase first
+  if (supabase) {
+    const { data, error, count } = await supabase
+      .from("signals")
+      .select("*", { count: "exact" })
+      .order("ts", { ascending: false })
+      .limit(limit);
+
+    if (!error) {
+      return res.json({
+        source: "supabase",
+        total: count,
+        showing: data.length,
+        entries: data.reverse(), // chronological order (oldest first)
+      });
+    }
+    log("WARN", "JOURNAL", "Supabase query failed — falling back to JSONL", { error: error.message });
+  }
+
+  // Fallback: read from local JSONL
   let fd;
   try {
-    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-    if (!fs.existsSync(JOURNAL_PATH)) return res.json({ entries: [] });
+    if (!fs.existsSync(JOURNAL_PATH)) return res.json({ source: "jsonl", entries: [] });
 
     const stat = fs.statSync(JOURNAL_PATH);
-    // Para ficheiros pequenos (<1MB), ler tudo; para grandes, ler só o final
-    const MAX_READ = 1024 * 1024; // 1MB
+    const MAX_READ = 1024 * 1024;
     const readSize = Math.min(stat.size, MAX_READ);
     const buf = Buffer.alloc(readSize);
     fd = fs.openSync(JOURNAL_PATH, "r");
@@ -497,18 +663,70 @@ app.get("/journal", (req, res) => {
     const entries = lines.slice(-limit).map(l => {
       try { return JSON.parse(l); } catch { return null; }
     }).filter(Boolean);
-    res.json({ total: stat.size < MAX_READ ? lines.length : "~" + lines.length, showing: entries.length, entries });
+    res.json({ source: "jsonl", total: stat.size < MAX_READ ? lines.length : "~" + lines.length, showing: entries.length, entries });
   } catch (err) {
     if (fd !== undefined) try { fs.closeSync(fd); } catch {}
     res.status(500).json({ error: "Erro ao ler journal" });
   }
 });
 
+// ── Operational health alert helper ────────────────────────────────────────
+async function sendHealthAlert(text) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) return;
+  await Promise.allSettled(
+    TELEGRAM_CHAT_IDS.map((chatId) =>
+      fetchWithTimeout(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+        },
+        10000
+      ).catch(() => {})
+    )
+  );
+}
+
 // ── Arranque + graceful shutdown ───────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const server = app.listen(PORT, () =>
-  log("INFO", "STARTUP", `Server v3 running on port ${PORT}`)
-);
+const server = app.listen(PORT, () => {
+  log("INFO", "STARTUP", `Server v4 running on port ${PORT}`);
+  sendHealthAlert(
+    `✅ Server online — MasterSignal Server v4\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `🔌 Port: ${PORT}\n` +
+    `📦 Journal: ${supabase ? "Supabase (persistent)" : "JSONL (ephemeral)"}\n` +
+    `🕐 ${new Date().toISOString()}`
+  );
+});
+
+// ── Crash handlers — alert via Telegram before dying ──────────────────────
+process.on("uncaughtException", async (err) => {
+  lastError = { message: err.message, stack: err.stack, ts: new Date().toISOString() };
+  log("FATAL", "PROCESS", "uncaughtException", { error: err.message, stack: err.stack });
+  await sendHealthAlert(
+    `🔴 CRASH — MasterSignal Server\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `💥 uncaughtException\n` +
+    `❌ ${err.message}\n` +
+    `🕐 ${new Date().toISOString()}`
+  ).catch(() => {});
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  lastError = { message: msg, ts: new Date().toISOString() };
+  log("FATAL", "PROCESS", "unhandledRejection", { error: msg });
+  await sendHealthAlert(
+    `🟠 UNHANDLED REJECTION — MasterSignal Server\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `⚠️ ${msg}\n` +
+    `🕐 ${new Date().toISOString()}`
+  ).catch(() => {});
+  process.exit(1);
+});
 
 function gracefulShutdown(signal) {
   log("INFO", "SHUTDOWN", `${signal} recebido — a encerrar...`);

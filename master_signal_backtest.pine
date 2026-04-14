@@ -1,7 +1,7 @@
 //@version=6
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trading_Signals v4 — Backtest
+// MasterSignal v4 — Backtest
 // Hybrid: blackcat1402 momentum + SMA bias (signal generation)
 //       + ICT OB/swing structure (SL placement + context)
 //
@@ -13,7 +13,7 @@
 //  - MTF simplificado a 1D only
 // ─────────────────────────────────────────────────────────────────────────────
 
-strategy("Trading_Signals v4 — Backtest", overlay=true, max_bars_back=500,
+strategy("MasterSignal v4 — Backtest", overlay=true, max_bars_back=500,
          initial_capital      = 100000,
          default_qty_type     = strategy.fixed,
          default_qty_value    = 1,
@@ -282,7 +282,7 @@ var table t = table.new(position.top_right, 2, 16,
                          bgcolor=color.new(color.black, 80))
 
 if barstate.islastconfirmedhistory or barstate.islast
-    table.cell(t, 0, 0,  "TRADING SIGNALS v4", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 0, 0,  "MASTERSIGNAL v4", text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(t, 1, 0,  "MOM+SMA",            text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
     table.cell(t, 0, 1,  "───────",             text_color=color.gray,  text_size=size.tiny)
     table.cell(t, 1, 1,  "───────",             text_color=color.gray,  text_size=size.tiny)
