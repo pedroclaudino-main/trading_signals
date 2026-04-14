@@ -1,7 +1,7 @@
 {
-  "name": "mnq-trade-server",
-  "version": "3.0.0",
-  "description": "ICT scalping signal server for CME_MINI:MNQ with Claude AI context analysis",
+  "name": "master-signal",
+  "version": "4.0.0",
+  "description": "MasterSignal — ICT scalping signal server for CME_MINI:MNQ with Claude AI context analysis",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

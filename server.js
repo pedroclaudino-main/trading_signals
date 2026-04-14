@@ -693,7 +693,7 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 const server = app.listen(PORT, () => {
   log("INFO", "STARTUP", `Server v4 running on port ${PORT}`);
   sendHealthAlert(
-    `✅ Server online — MNQ Signal Server v4\n` +
+    `✅ Server online — MasterSignal Server v4\n` +
     `━━━━━━━━━━━━━━━━━\n` +
     `🔌 Port: ${PORT}\n` +
     `📦 Journal: ${supabase ? "Supabase (persistent)" : "JSONL (ephemeral)"}\n` +
@@ -706,7 +706,7 @@ process.on("uncaughtException", async (err) => {
   lastError = { message: err.message, stack: err.stack, ts: new Date().toISOString() };
   log("FATAL", "PROCESS", "uncaughtException", { error: err.message, stack: err.stack });
   await sendHealthAlert(
-    `🔴 CRASH — MNQ Signal Server\n` +
+    `🔴 CRASH — MasterSignal Server\n` +
     `━━━━━━━━━━━━━━━━━\n` +
     `💥 uncaughtException\n` +
     `❌ ${err.message}\n` +
@@ -720,7 +720,7 @@ process.on("unhandledRejection", async (reason) => {
   lastError = { message: msg, ts: new Date().toISOString() };
   log("FATAL", "PROCESS", "unhandledRejection", { error: msg });
   await sendHealthAlert(
-    `🟠 UNHANDLED REJECTION — MNQ Signal Server\n` +
+    `🟠 UNHANDLED REJECTION — MasterSignal Server\n` +
     `━━━━━━━━━━━━━━━━━\n` +
     `⚠️ ${msg}\n` +
     `🕐 ${new Date().toISOString()}`

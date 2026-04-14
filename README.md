@@ -1,4 +1,4 @@
-# MNQ ICT Scalper v3 — Setup Guide
+# MasterSignal v4 — Setup Guide
 
 Sistema completo de alertas ICT para CME_MINI:MNQ com análise contextual por Claude AI.
 
@@ -6,7 +6,7 @@ Sistema completo de alertas ICT para CME_MINI:MNQ com análise contextual por Cl
 
 ## O que mudou na v3
 
-### Pine Script (trading_signals.pine / backtest)
+### Pine Script (master_signal.pine / backtest)
 - **MTF corrigido**: trend agora usa close do timeframe correto (não close 1m)
 - **MTF OB com momentum**: OBs nos HTFs verificam força da vela (não apenas cor)
 - **MTF FVG limitado**: apenas 3 barras lookback (não 5+)
@@ -67,7 +67,7 @@ TradingView (Pine Script v3) → Webhook Server (Railway) → Claude AI (context
 
 ## PASSO 3 — Pine Script no TradingView
 
-1. Chart do MNQ → Pine Editor → cola `trading_signals.pine`
+1. Chart do MNQ → Pine Editor → cola `master_signal.pine`
 2. Edita WEBHOOK_URL e WEBHOOK_SECRET
 3. Add to chart (timeframe 1 minuto)
 4. Cria Alert → Webhook URL → expiration open-ended

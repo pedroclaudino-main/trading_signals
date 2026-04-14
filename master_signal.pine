@@ -1,42 +1,19 @@
 //@version=6
+indicator("MasterSignal v4", overlay=true, max_bars_back=500, max_labels_count=200)
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Trading_Signals v4 — Backtest
-// Hybrid: blackcat1402 momentum + SMA bias (signal generation)
-//       + ICT OB/swing structure (SL placement + context)
-//
-// v4 mudanças:
-//  - Sinal baseado em momentum pullback + SMA trend alignment
-//  - FVG removido como gate de entrada (impossível em 1m MNQ líquido)
-//  - OBs mantidos para contexto visual e webhook
-//  - Sessão contínua 14:30-17:30 Europe/Lisbon
-//  - MTF simplificado a 1D only
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+var string WEBHOOK_URL    = input.string("https://trading-signals.up.railway.app/webhook", "Webhook URL")
+var string WEBHOOK_SECRET = input.string("", "Webhook Secret")
 
-strategy("Trading_Signals v4 — Backtest", overlay=true, max_bars_back=500,
-         initial_capital      = 100000,
-         default_qty_type     = strategy.fixed,
-         default_qty_value    = 1,
-         commission_type      = strategy.commission.cash_per_contract,
-         commission_value     = 0.62,
-         slippage             = 1,
-         pyramiding           = 0,
-         process_orders_on_close = false,
-         close_entries_rule   = "FIFO",
-         margin_long          = 5,
-         margin_short         = 5,
-         max_labels_count     = 200)
-
-// ── Inputs ─────────────────────────────────────────────────────────────────
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
 maxRiskPts    = input.float(50.0, "Max Risk (pontos)",         minval=5.0,             group="Estratégia")
-i_contracts   = input.int  (1,    "Contratos por trade",       minval=1,   maxval=10,  group="Backtest")
-maxDailyTrades= input.int  (4,    "Max trades por dia",        minval=1,   maxval=10,  group="Backtest")
-maxSignalsSes = input.int  (2,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Backtest")
 
 atrLen        = input.int  (14,   "ATR Period",                minval=5,   maxval=50,  group="Filtros")
 useVolFilter  = input.bool (false, "Filtro: Volume acima média",                       group="Filtros")
 volMultiplier = input.float(1.0,  "Volume Min (× SMA20)",      minval=0.5, maxval=3.0, group="Filtros")
+maxSignalsSes = input.int  (2,    "Max sinais por sessão",     minval=1,   maxval=5,   group="Filtros")
 maxSwingAge   = input.int  (80,   "Swing Max Age (barras)",    minval=10,  maxval=300,  group="Filtros")
 
 // Momentum (blackcat1402)
@@ -47,7 +24,9 @@ momLookback   = input.int  (5,    "Momentum Lookback (barras)",minval=2,   maxva
 useMTF        = input.bool (true, "Ativar Multi-Timeframe",                            group="Multi-Timeframe")
 mtfEmaLen     = input.int  (20,   "MTF EMA Period",  minval=5,   maxval=50,            group="Multi-Timeframe")
 
-// ── Sessions ──────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSIONS — janela contínua US session
+// ═══════════════════════════════════════════════════════════════════════════
 inSession = not na(time(timeframe.period, "1430-1730:23456", "Europe/Lisbon"))
 inSession1 = not na(time(timeframe.period, "1430-1530:23456", "Europe/Lisbon"))
 inSession2 = not na(time(timeframe.period, "1530-1630:23456", "Europe/Lisbon"))
@@ -62,7 +41,9 @@ var int signalsThisSession = 0
 if sessionStarted
     signalsThisSession := 0
 
-// ── Utilities ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
 roundTick(x) => math.round(x * 4) / 4
 
 atr    = ta.atr(atrLen)
@@ -71,7 +52,6 @@ hasVolume() => not useVolFilter or (volume > volSma * volMultiplier)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MOMENTUM OSCILLATOR (blackcat1402 L1 Swing Trade Oscillator)
-// Weighted price normalizado 0-100
 // ═══════════════════════════════════════════════════════════════════════════
 wp        = (2.0 * close + high + low + open) / 5.0
 wpHigh    = ta.highest(wp, 25)
@@ -79,17 +59,13 @@ wpLow     = ta.lowest(wp, 11)
 momentum  = wpHigh != wpLow ? (wp - wpLow) / (wpHigh - wpLow) * 100.0 : 50.0
 momSmooth = ta.ema(momentum, 5)
 
-// Detectar pullback: momentum esteve abaixo/acima da zona nos últimos N barras
 momWasLow  = ta.lowest(momSmooth, momLookback) < momPullback
 momWasHigh = ta.highest(momSmooth, momLookback) > momOverbought
-
-// Momentum a reverter (turning): subindo após pullback, descendo após overbought
 momRising  = momSmooth > momSmooth[1] and momSmooth > momSmooth[2]
 momFalling = momSmooth < momSmooth[1] and momSmooth < momSmooth[2]
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SMA TREND ALIGNMENT (blackcat1402 L2/L3 Bias Scalper)
-// SMA3 > SMA10 > SMA20 = institutional bullish push
 // ═══════════════════════════════════════════════════════════════════════════
 sma3  = ta.sma(close, 3)
 sma10 = ta.sma(close, 10)
@@ -98,8 +74,7 @@ instBullish = sma3 > sma10 and sma10 > sma20
 instBearish = sma3 < sma10 and sma10 < sma20
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MULTI-TIMEFRAME — trend direction only
-// Apenas 1D para não ser demasiado restritivo
+// MULTI-TIMEFRAME — apenas 1D
 // ═══════════════════════════════════════════════════════════════════════════
 mtf_trend_bull(emaLen) => close > ta.ema(close, emaLen)
 mtf_trend_bear(emaLen) => close < ta.ema(close, emaLen)
@@ -109,7 +84,6 @@ d_bear  = request.security(syminfo.tickerid, "D",   mtf_trend_bear(mtfEmaLen), l
 h4_bull = request.security(syminfo.tickerid, "240",  mtf_trend_bull(mtfEmaLen), lookahead=barmerge.lookahead_off)
 h4_bear = request.security(syminfo.tickerid, "240",  mtf_trend_bear(mtfEmaLen), lookahead=barmerge.lookahead_off)
 
-// Apenas 1D — 4H é informativo mas não bloqueia
 mtfBullOK = not useMTF or d_bull
 mtfBearOK = not useMTF or d_bear
 
@@ -137,8 +111,7 @@ plot(swingHigh, "Swing High", color.new(color.red,   40), 2, plot.style_cross, o
 plot(swingLow,  "Swing Low",  color.new(color.green, 40), 2, plot.style_cross, offset=-swingLookback)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ORDER BLOCKS — mantidos para contexto (bias info)
-// Não gatekeep entries, apenas fornecem contexto para webhook
+// ORDER BLOCKS — contexto para webhook (não gatekeep entries)
 // ═══════════════════════════════════════════════════════════════════════════
 obStrength = input.float(1.0, "OB Strength", minval=0.5, maxval=3.0, group="Contexto ICT")
 
@@ -171,8 +144,6 @@ plotchar(isBearishOB(1), "Bear OB", "▼", location.abovebar, color.orange, size
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SIGNAL GENERATION — Momentum Pullback + SMA Trend
-// LONG:  SMA trend bullish + momentum pullback reversal + bullish candle
-// SHORT: SMA trend bearish + momentum overbought reversal + bearish candle
 // ═══════════════════════════════════════════════════════════════════════════
 bullishCandle = close > open
 bearishCandle = close < open
@@ -208,34 +179,6 @@ validLong  = longSignal  and not na(longRisk)  and longRisk  > 0 and longRisk  <
 validShort = shortSignal and not na(shortRisk) and shortRisk > 0 and shortRisk <= maxRiskPts
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EXECUÇÃO
-// ═══════════════════════════════════════════════════════════════════════════
-var int dailyTrades = 0
-if isNewTradingDay
-    dailyTrades := 0
-
-canTrade = dailyTrades < maxDailyTrades
-
-if validLong and canTrade
-    strategy.entry("Long",  strategy.long,  qty=i_contracts,
-                   comment="LONG | " + sessionLabel + " | MOM+SMA")
-    strategy.exit ("Long Exit",  "Long",
-                   limit=longTP,  stop=longSL,
-                   comment_profit="TP ✓", comment_loss="SL ✗")
-    dailyTrades += 1
-
-if validShort and canTrade
-    strategy.entry("Short", strategy.short, qty=i_contracts,
-                   comment="SHORT | " + sessionLabel + " | MOM+SMA")
-    strategy.exit ("Short Exit", "Short",
-                   limit=shortTP, stop=shortSL,
-                   comment_profit="TP ✓", comment_loss="SL ✗")
-    dailyTrades += 1
-
-if sessionEnded and strategy.position_size != 0
-    strategy.close_all(comment="Fim Sessão")
-
-// ═══════════════════════════════════════════════════════════════════════════
 // PLOTS
 // ═══════════════════════════════════════════════════════════════════════════
 plot(validLong  ? longEntry  : na, "Long Entry",  color.green,                linewidth=4, style=plot.style_circles)
@@ -254,72 +197,84 @@ if validShort
               style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MOMENTUM PANEL — visualização do oscilador
+// LEGENDA
+// ═══════════════════════════════════════════════════════════════════════════
+var table legend = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_color=color.new(color.gray, 60), border_width=1)
+if barstate.islastconfirmedhistory or barstate.islast
+    table.cell(legend, 0, 0,  "MASTERSIGNAL v4", text_color=color.white,  text_size=size.small, text_halign=text.align_left)
+    table.cell(legend, 1, 0,  "MOM+SMA",            text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
+    table.cell(legend, 0, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 1, 1,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 0, 2,  "Momentum",            text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _momCol = momSmooth > momOverbought ? color.red : momSmooth < momPullback ? color.green : color.yellow
+    table.cell(legend, 1, 2,  str.tostring(momSmooth, "#.#"), text_color=_momCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 3,  "SMA Trend",           text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _trendCol = instBullish ? color.green : instBearish ? color.red : color.gray
+    _trendTxt = instBullish ? "▲ BULL" : instBearish ? "▼ BEAR" : "— FLAT"
+    table.cell(legend, 1, 3,  _trendTxt,             text_color=_trendCol,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 4,  "OB Bias",             text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    _obCol = obBias == "BULLISH" ? color.lime : obBias == "BEARISH" ? color.orange : color.gray
+    table.cell(legend, 1, 4,  obBias,                text_color=_obCol,       text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 5,  "MTF 1D",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 5,  d_bull ? "▲ BULL" : d_bear ? "▼ BEAR" : "— FLAT",
+               text_color=d_bull ? color.green : d_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 6,  "Sinais sessão",       text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 6,  str.tostring(signalsThisSession) + "/" + str.tostring(maxSignalsSes),
+               text_color=signalsThisSession >= maxSignalsSes ? color.red : color.green, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 7,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 1, 7,  "───────",             text_color=color.gray,   text_size=size.tiny)
+    table.cell(legend, 0, 8,  "● Verde",             text_color=color.green,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 8,  "Long Entry",          text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 9,  "● Vermelho",          text_color=color.red,    text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 9,  "Short Entry",         text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 10, "▲ Lima",              text_color=color.lime,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 10, "Bull OB (contexto)",  text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 11, "▼ Laranja",           text_color=color.orange, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 11, "Bear OB (contexto)",  text_color=color.white,  text_size=size.tiny, text_halign=text.align_left)
+    _volOk = hasVolume()
+    table.cell(legend, 0, 12, "Volume",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 12, _volOk ? "✓ OK" : "✗ Baixo", text_color=_volOk ? color.green : color.red, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 0, 13, "MTF 4H",              text_color=color.gray,   text_size=size.tiny, text_halign=text.align_left)
+    table.cell(legend, 1, 13, h4_bull ? "▲ BULL" : h4_bear ? "▼ BEAR" : "— FLAT",
+               text_color=h4_bull ? color.green : h4_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA WINDOW
 // ═══════════════════════════════════════════════════════════════════════════
 plotchar(inSession,    "In Session", "", location.top,      color.yellow, display=display.data_window)
 plotchar(instBullish,  "SMA Bull",   "", location.abovebar, color.lime,   display=display.data_window)
 plotchar(instBearish,  "SMA Bear",   "", location.belowbar, color.orange, display=display.data_window)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TABELA DE STATS
+// WEBHOOK PAYLOAD — v4 com momentum + SMA dados
 // ═══════════════════════════════════════════════════════════════════════════
-var int longCount  = 0
-var int shortCount = 0
+if (validLong or validShort) and barstate.isconfirmed
+    entryPrice = validLong ? longEntry   : shortEntry
+    slPrice    = validLong ? longSL      : shortSL
+    tpPrice    = validLong ? longTP      : shortTP
+    riskPts    = validLong ? longRisk    : shortRisk
 
-if validLong
-    longCount += 1
-if validShort
-    shortCount += 1
+    swingLowStr  = not na(lastSwingLow)  ? str.tostring(lastSwingLow,  "#.##") : "null"
+    swingHighStr = not na(lastSwingHigh) ? str.tostring(lastSwingHigh, "#.##") : "null"
 
-totalTrades  = strategy.closedtrades
-totalWins    = strategy.wintrades
-totalPct     = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0.0
-netProfit    = strategy.netprofit
-profitFactor = strategy.grossprofit > 0 and strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
+    _mtf_d  = d_bull  ? "BULL" : d_bear  ? "BEAR" : "NEUTRAL"
+    _mtf_h4 = h4_bull ? "BULL" : h4_bear ? "BEAR" : "NEUTRAL"
 
-var table t = table.new(position.top_right, 2, 16,
-                         border_color=color.new(color.gray, 60), border_width=1,
-                         bgcolor=color.new(color.black, 80))
+    payload  = '{"webhook_secret":"' + WEBHOOK_SECRET + '",'
+    payload += '"session":"' + sessionLabel + '",'
+    payload += '"current_price":' + str.tostring(close, "#.##") + ','
+    payload += '"candles_1m":['
+    payload += '{"o":' + str.tostring(open, "#.##") + ',"h":' + str.tostring(high, "#.##") + ',"l":' + str.tostring(low, "#.##") + ',"c":' + str.tostring(close, "#.##") + ',"v":' + str.tostring(volume, "#") + '},'
+    payload += '{"o":' + str.tostring(open[1], "#.##") + ',"h":' + str.tostring(high[1], "#.##") + ',"l":' + str.tostring(low[1], "#.##") + ',"c":' + str.tostring(close[1], "#.##") + ',"v":' + str.tostring(volume[1], "#") + '},'
+    payload += '{"o":' + str.tostring(open[2], "#.##") + ',"h":' + str.tostring(high[2], "#.##") + ',"l":' + str.tostring(low[2], "#.##") + ',"c":' + str.tostring(close[2], "#.##") + ',"v":' + str.tostring(volume[2], "#") + '}],'
+    payload += '"ob_bias":"' + obBias + '",'
+    payload += '"swings":[{"type":"low","price":' + swingLowStr + '},{"type":"high","price":' + swingHighStr + '}],'
+    payload += '"mtf":{"1d":"' + _mtf_d + '","4h":"' + _mtf_h4 + '"},'
+    payload += '"momentum":' + str.tostring(momSmooth, "#.#") + ','
+    payload += '"institutional_bias":"' + (instBullish ? "BULLISH" : instBearish ? "BEARISH" : "NEUTRAL") + '",'
+    payload += '"suggested_entry":' + str.tostring(entryPrice, "#.##") + ','
+    payload += '"suggested_sl":' + str.tostring(slPrice, "#.##") + ','
+    payload += '"tp":' + str.tostring(tpPrice, "#.##") + ','
+    payload += '"risk_pts":' + str.tostring(riskPts, "#.##") + '}'
 
-if barstate.islastconfirmedhistory or barstate.islast
-    table.cell(t, 0, 0,  "TRADING SIGNALS v4", text_color=color.white, text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 1, 0,  "MOM+SMA",            text_color=color.yellow, text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 0, 1,  "───────",             text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 1,  "───────",             text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 0, 2,  "Momentum",            text_color=color.gray,  text_size=size.tiny, text_halign=text.align_left)
-    _momCol = momSmooth > momOverbought ? color.red : momSmooth < momPullback ? color.green : color.yellow
-    table.cell(t, 1, 2,  str.tostring(momSmooth, "#.#"), text_color=_momCol, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 3,  "SMA Trend",           text_color=color.gray,  text_size=size.tiny, text_halign=text.align_left)
-    _trendCol = instBullish ? color.green : instBearish ? color.red : color.gray
-    _trendTxt = instBullish ? "▲ BULL" : instBearish ? "▼ BEAR" : "— FLAT"
-    table.cell(t, 1, 3,  _trendTxt,             text_color=_trendCol,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 4,  "OB Bias",             text_color=color.gray,  text_size=size.tiny, text_halign=text.align_left)
-    _obCol = obBias == "BULLISH" ? color.lime : obBias == "BEARISH" ? color.orange : color.gray
-    table.cell(t, 1, 4,  obBias,                text_color=_obCol,      text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 5,  "MTF 1D",              text_color=color.gray,  text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 5,  d_bull ? "▲ BULL" : d_bear ? "▼ BEAR" : "— FLAT",
-               text_color=d_bull ? color.green : d_bear ? color.red : color.gray, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 6,  "───────",             text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 6,  "───────",             text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 0, 7,  "ESTATÍSTICAS",        text_color=color.white, text_size=size.small, text_halign=text.align_left)
-    table.cell(t, 1, 7,  "",                   text_size=size.small)
-    table.cell(t, 0, 8,  "Sinais Long",         text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 8,  str.tostring(longCount),  text_color=color.green, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 9,  "Sinais Short",        text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 9,  str.tostring(shortCount), text_color=color.red,   text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 10, "Trades Fechados",     text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 10, str.tostring(totalTrades),text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
-    _wrColor = totalPct >= 40 ? color.green : color.red
-    table.cell(t, 0, 11, "Win Rate",            text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 11, str.tostring(totalPct, "#.#") + "%", text_color=_wrColor, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 12, "Lucro Líquido",       text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    _pnlColor = netProfit >= 0 ? color.green : color.red
-    table.cell(t, 1, 12, "$" + str.tostring(netProfit, "#.##"), text_color=_pnlColor, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 13, "Profit Factor",       text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    _pfColor = profitFactor >= 1.5 ? color.green : profitFactor >= 1.0 ? color.yellow : color.red
-    table.cell(t, 1, 13, str.tostring(profitFactor, "#.##"), text_color=_pfColor, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 14, "Drawdown Máx",        text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 14, str.tostring(strategy.max_drawdown, "#.##"), text_color=color.orange, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 0, 15, "Trades hoje",         text_color=color.white, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(t, 1, 15, str.tostring(dailyTrades) + "/" + str.tostring(maxDailyTrades),
-               text_color=dailyTrades >= maxDailyTrades ? color.red : color.green, text_size=size.tiny, text_halign=text.align_left)
+    alert(payload, alert.freq_once_per_bar_close)
