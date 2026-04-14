@@ -20,6 +20,10 @@ const SUPABASE_KEY       = process.env.SUPABASE_KEY;
 const APEX_MAX_DAILY_SIGNALS = parseInt(process.env.APEX_MAX_DAILY_SIGNALS || "10", 10);
 const APEX_DAILY_LOSS_LIMIT  = parseFloat(process.env.APEX_DAILY_LOSS_LIMIT || "150"); // points
 
+// News Event Filter config
+const NEWS_SUPPRESS_WINDOW_MIN = parseInt(process.env.NEWS_SUPPRESS_WINDOW_MIN || "15", 10);
+const NEWS_SUPPRESS_MODE       = process.env.NEWS_SUPPRESS_MODE || "block"; // "block" | "warn"
+
 if (!ANTHROPIC_API_KEY) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "FATAL", msg: "ANTHROPIC_API_KEY não definida" }));
   process.exit(1);
@@ -100,6 +104,145 @@ function recordSignalRisk(signal) {
     });
   }
 }
+
+// ── News Event Filter — suppress signals near high-impact economic events ─
+const newsCache = {
+  date: null,     // YYYY-MM-DD when cache was last refreshed
+  events: [],     // [{ time: Date, title: string, currency: string, impact: string }]
+  fetching: false,
+};
+
+// Static recurring high-impact USD events (known schedule patterns)
+// These serve as fallback when the live feed is unavailable
+function getStaticHighImpactEvents(dateStr) {
+  const events = [];
+  const d = new Date(dateStr + "T00:00:00-05:00"); // ET
+  const dayOfWeek = d.getDay(); // 0=Sun, 1=Mon...
+  const dayOfMonth = d.getDate();
+
+  // NFP — first Friday of month
+  if (dayOfWeek === 5 && dayOfMonth <= 7) {
+    events.push({ time: new Date(dateStr + "T08:30:00-05:00"), title: "Non-Farm Payrolls", currency: "USD", impact: "high" });
+    events.push({ time: new Date(dateStr + "T08:30:00-05:00"), title: "Unemployment Rate", currency: "USD", impact: "high" });
+  }
+
+  // CPI — typically second Tuesday or Wednesday of month
+  if ((dayOfWeek === 2 || dayOfWeek === 3) && dayOfMonth >= 10 && dayOfMonth <= 14) {
+    events.push({ time: new Date(dateStr + "T08:30:00-05:00"), title: "CPI (estimated)", currency: "USD", impact: "high" });
+  }
+
+  // FOMC — 8 meetings/year, typically Tue-Wed, announcement at 14:00 ET
+  // We use a broad heuristic: 3rd week of Jan, Mar, May, Jun, Jul, Sep, Nov, Dec
+  const month = d.getMonth(); // 0-indexed
+  const fomcMonths = [0, 2, 4, 5, 6, 8, 10, 11];
+  if (fomcMonths.includes(month) && dayOfWeek === 3 && dayOfMonth >= 15 && dayOfMonth <= 22) {
+    events.push({ time: new Date(dateStr + "T14:00:00-05:00"), title: "FOMC Rate Decision (estimated)", currency: "USD", impact: "high" });
+  }
+
+  return events;
+}
+
+async function fetchEconomicCalendar() {
+  const today = getETDate();
+  if (newsCache.date === today && newsCache.events.length > 0) return newsCache.events;
+  if (newsCache.fetching) return newsCache.events; // avoid concurrent fetches
+
+  newsCache.fetching = true;
+  try {
+    // Use Forex Factory's week calendar page via a lightweight JSON proxy
+    // Fallback: novalabs or static list
+    const url = `https://nfs.faireconomy.media/ff_calendar_thisweek.json`;
+    const res = await fetchWithTimeout(url, {}, 8000);
+
+    if (!res.ok) {
+      log("WARN", "NEWS_FILTER", `Calendar API returned ${res.status} — using static fallback`);
+      newsCache.events = getStaticHighImpactEvents(today);
+      newsCache.date = today;
+      return newsCache.events;
+    }
+
+    const data = await res.json();
+    // Filter to high-impact USD events for today
+    const todayEvents = [];
+    for (const ev of data) {
+      if (ev.impact !== "High") continue;
+      if (ev.country !== "USD") continue;
+
+      // Parse date — format: "YYYY-MM-DDT08:30:00-04:00" or similar
+      const eventDate = new Date(ev.date);
+      const eventDateStr = eventDate.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+
+      // Include events for today and tomorrow (to catch overnight/pre-market)
+      const tomorrow = new Date(today + "T00:00:00-05:00");
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowStr = tomorrow.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+
+      if (eventDateStr === today || eventDateStr === tomorrowStr) {
+        todayEvents.push({
+          time: eventDate,
+          title: ev.title,
+          currency: ev.country,
+          impact: ev.impact.toLowerCase(),
+        });
+      }
+    }
+
+    if (todayEvents.length > 0) {
+      newsCache.events = todayEvents;
+      log("INFO", "NEWS_FILTER", `Loaded ${todayEvents.length} high-impact events for ${today}`, {
+        events: todayEvents.map(e => `${e.title} @ ${e.time.toISOString()}`),
+      });
+    } else {
+      // No high-impact events from feed — merge with static as safety net
+      newsCache.events = getStaticHighImpactEvents(today);
+      log("INFO", "NEWS_FILTER", `No high-impact events from feed for ${today}, static fallback: ${newsCache.events.length} events`);
+    }
+
+    newsCache.date = today;
+    return newsCache.events;
+  } catch (err) {
+    log("WARN", "NEWS_FILTER", "Failed to fetch economic calendar — using static fallback", { error: err.message });
+    newsCache.events = getStaticHighImpactEvents(today);
+    newsCache.date = today;
+    return newsCache.events;
+  } finally {
+    newsCache.fetching = false;
+  }
+}
+
+function checkNewsFilter(events) {
+  if (!events || events.length === 0) return { blocked: false };
+
+  const now = Date.now();
+  const windowMs = NEWS_SUPPRESS_WINDOW_MIN * 60 * 1000;
+
+  for (const ev of events) {
+    const eventTime = ev.time instanceof Date ? ev.time.getTime() : new Date(ev.time).getTime();
+    const diff = Math.abs(now - eventTime);
+    if (diff <= windowMs) {
+      const minutesAway = Math.round(diff / 60000);
+      const direction = now < eventTime ? "in" : "ago";
+      return {
+        blocked: true,
+        event: ev.title,
+        detail: `${ev.title} (${ev.currency}) — ${minutesAway}min ${direction}`,
+      };
+    }
+  }
+
+  return { blocked: false };
+}
+
+// Pre-warm the cache on startup
+fetchEconomicCalendar().catch(() => {});
+
+// Refresh cache daily at 00:05 ET
+setInterval(() => {
+  const today = getETDate();
+  if (newsCache.date !== today) {
+    fetchEconomicCalendar().catch(() => {});
+  }
+}, 5 * 60 * 1000);
 
 // ── Rate Limiting ──────────────────────────────────────────────────────────
 const rateStore = new Map();
@@ -504,6 +647,40 @@ app.post("/webhook", async (req, res) => {
     }
     journalSignal(req.body, blockedSignal, null);
     return res.json({ ok: true, signal: blockedSignal, risk_blocked: true });
+  }
+
+  // 7. News Event Filter — suppress signals near high-impact economic events
+  const newsEvents = await fetchEconomicCalendar();
+  const newsCheck = checkNewsFilter(newsEvents);
+  if (newsCheck.blocked) {
+    log("WARN", "NEWS_FILTER", "Signal suppressed due to high-impact news event", {
+      event: newsCheck.event, detail: newsCheck.detail, session,
+    });
+    const newsBlockedSignal = {
+      signal: "NO_TRADE",
+      reason: `📰 News Filter: ${newsCheck.detail}`,
+      no_trade_reason: "news_event_suppressed",
+      entry: null, sl: null, tp: null, risk_pts: null,
+      confidence: "LOW", mtf_aligned: false,
+    };
+
+    if (NEWS_SUPPRESS_MODE === "block") {
+      // Send Telegram alert about suppression
+      if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_IDS.length > 0) {
+        sendHealthAlert(
+          `📰 NEWS FILTER — Signal Suppressed\n` +
+          `━━━━━━━━━━━━━━━━━\n` +
+          `📊 Session: ${session}\n` +
+          `⚠️ ${newsCheck.detail}\n` +
+          `🔒 Window: ±${NEWS_SUPPRESS_WINDOW_MIN}min\n` +
+          `🕐 ${new Date().toISOString()}`
+        ).catch(() => {});
+      }
+      journalSignal(req.body, newsBlockedSignal, null);
+      return res.json({ ok: true, signal: newsBlockedSignal, news_blocked: true });
+    }
+    // warn mode — continue processing but flag it (newsCheck available downstream)
+    log("INFO", "NEWS_FILTER", "News event detected — warn mode, continuing signal processing");
   }
 
   try {
@@ -938,6 +1115,7 @@ app.get("/", (req, res) =>
     telegram:     TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
     journal:      supabase ? "supabase (persistent)" : `jsonl: ${JOURNAL_PATH} (ephemeral)`,
+    news_filter:  `${NEWS_SUPPRESS_MODE} (±${NEWS_SUPPRESS_WINDOW_MIN}min)`,
     notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
     last_error:   lastError,
@@ -957,6 +1135,25 @@ app.get("/risk-status", (req, res) => {
     remaining_signals: Math.max(0, APEX_MAX_DAILY_SIGNALS - dailyRisk.signalCount),
     remaining_risk_pts: Math.max(0, APEX_DAILY_LOSS_LIMIT - dailyRisk.totalRiskPts),
     signals: dailyRisk.signals,
+  });
+});
+
+// ── News filter status endpoint ───────────────────────────────────────────
+app.get("/news-status", async (req, res) => {
+  const events = await fetchEconomicCalendar();
+  const check = checkNewsFilter(events);
+  res.json({
+    mode: NEWS_SUPPRESS_MODE,
+    window_min: NEWS_SUPPRESS_WINDOW_MIN,
+    cached_date: newsCache.date,
+    events_today: events.map(e => ({
+      title: e.title,
+      time: e.time instanceof Date ? e.time.toISOString() : e.time,
+      currency: e.currency,
+      impact: e.impact,
+    })),
+    currently_blocked: check.blocked,
+    blocking_event: check.blocked ? check.detail : null,
   });
 });
 

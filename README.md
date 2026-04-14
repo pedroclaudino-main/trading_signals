@@ -103,6 +103,25 @@ curl https://SEU-PROJETO.railway.app/report/weekly?weeks_back=1
 
 ---
 
+## News Event Filter
+
+Automatically suppresses signals during high-impact economic events (FOMC, NFP, CPI, etc.) to protect against slippage and risk spikes — critical for Apex Trader Funding compliance.
+
+**Configuration:**
+- `NEWS_SUPPRESS_WINDOW_MIN` — minutes before/after event to suppress (default: 15)
+- `NEWS_SUPPRESS_MODE` — `block` (suppress entirely) or `warn` (flag but continue)
+
+**Data source:** [Fair Economy / Forex Factory](https://nfs.faireconomy.media/ff_calendar_thisweek.json) with static fallback for known recurring events (NFP, CPI, FOMC).
+
+```bash
+# Check today's high-impact events and filter status
+curl https://SEU-PROJETO.railway.app/news-status
+```
+
+Suppressed signals are logged in the journal with reason `news_event_suppressed`. A Telegram alert is sent when a signal is blocked by the news filter.
+
+---
+
 ## Janelas de trading (hora de Lisboa)
 
 | Janela | Horário Lisboa | Equivalente NY |
