@@ -727,6 +727,208 @@ app.get("/stats", async (req, res) => {
   });
 });
 
+// ── Weekly Performance Dashboard ──────────────────────────────────────────
+
+async function generateWeeklyReport(weeksBack = 0) {
+  if (!supabase) return { error: "Weekly reports require Supabase" };
+
+  // Calculate week boundaries (Mon 00:00 ET to Sun 23:59 ET)
+  const now = getETDate();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon...
+  const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+
+  const weekEnd = new Date(today);
+  weekEnd.setDate(today.getDate() - mondayOffset + 6 - weeksBack * 7);
+  weekEnd.setHours(23, 59, 59, 999);
+
+  const weekStart = new Date(weekEnd);
+  weekStart.setDate(weekEnd.getDate() - 6);
+  weekStart.setHours(0, 0, 0, 0);
+
+  // Query closed trades for the week
+  const { data: trades, error } = await supabase
+    .from("signals")
+    .select("signal, entry, sl, tp, close_price, pnl_pts, closed_by, ts, close_ts, confidence, session")
+    .eq("status", "closed")
+    .neq("closed_by", "unknown")
+    .gte("close_ts", weekStart.toISOString())
+    .lte("close_ts", weekEnd.toISOString())
+    .order("close_ts", { ascending: true });
+
+  if (error) {
+    log("ERROR", "REPORT", "Failed to fetch weekly trades", { error: error.message });
+    return { error: "Failed to fetch weekly data" };
+  }
+
+  // Query total signals (including NO_TRADE/skipped) for the week
+  const { count: totalSignals } = await supabase
+    .from("signals")
+    .select("id", { count: "exact", head: true })
+    .gte("ts", weekStart.toISOString())
+    .lte("ts", weekEnd.toISOString());
+
+  let wins = 0, losses = 0, totalPnl = 0, totalRR = 0;
+  let grossProfit = 0, grossLoss = 0;
+  const bySession = {};
+  const byClosedBy = {};
+  let bestTrade = null, worstTrade = null;
+
+  for (const t of trades) {
+    const pnl = t.pnl_pts ?? 0;
+    totalPnl += pnl;
+
+    if (pnl > 0) { wins++; grossProfit += pnl; }
+    else { losses++; grossLoss += Math.abs(pnl); }
+
+    if (typeof t.entry === "number" && typeof t.sl === "number") {
+      const risk = Math.abs(t.entry - t.sl);
+      if (risk > 0) totalRR += pnl / risk;
+    }
+
+    const sess = t.session || "unknown";
+    if (!bySession[sess]) bySession[sess] = { trades: 0, pnl: 0, wins: 0 };
+    bySession[sess].trades++;
+    bySession[sess].pnl += pnl;
+    if (pnl > 0) bySession[sess].wins++;
+
+    const cb = t.closed_by || "unknown";
+    byClosedBy[cb] = (byClosedBy[cb] || 0) + 1;
+
+    if (!bestTrade || pnl > bestTrade.pnl) bestTrade = { pnl, signal: t.signal, session: sess };
+    if (!worstTrade || pnl < worstTrade.pnl) worstTrade = { pnl, signal: t.signal, session: sess };
+  }
+
+  const total = trades.length;
+  const winRate = total > 0 ? parseFloat((wins / total * 100).toFixed(1)) : null;
+  const avgPnl = total > 0 ? parseFloat((totalPnl / total).toFixed(2)) : null;
+  const avgRR = total > 0 ? parseFloat((totalRR / total).toFixed(2)) : null;
+  const profitFactor = grossLoss > 0 ? parseFloat((grossProfit / grossLoss).toFixed(2)) : (grossProfit > 0 ? Infinity : 0);
+
+  const weekLabel = `${weekStart.toISOString().slice(0, 10)} → ${weekEnd.toISOString().slice(0, 10)}`;
+
+  return {
+    week: weekLabel,
+    week_start: weekStart.toISOString(),
+    week_end: weekEnd.toISOString(),
+    total_signals: totalSignals || 0,
+    total_trades: total,
+    wins,
+    losses,
+    win_rate: winRate,
+    total_pnl_pts: parseFloat(totalPnl.toFixed(2)),
+    avg_pnl_pts: avgPnl,
+    avg_rr: avgRR,
+    profit_factor: profitFactor,
+    by_session: bySession,
+    by_closed_by: byClosedBy,
+    best_trade: bestTrade,
+    worst_trade: worstTrade,
+  };
+}
+
+function formatWeeklyReportTelegram(report) {
+  if (report.error) return `❌ Report Error: ${report.error}`;
+
+  const targetPts = 20; // approximate 1% weekly target in MNQ points
+  const vsTarget = report.total_pnl_pts >= targetPts ? "✅ ON TARGET" : "⚠️ BELOW TARGET";
+
+  let msg =
+    `📊 WEEKLY PERFORMANCE — MNQ\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📅 ${report.week}\n\n` +
+    `📈 Summary\n` +
+    `  Signals generated: ${report.total_signals}\n` +
+    `  Trades closed: ${report.total_trades}\n` +
+    `  Wins: ${report.wins}  |  Losses: ${report.losses}\n` +
+    `  Win rate: ${report.win_rate !== null ? report.win_rate + "%" : "N/A"}\n\n` +
+    `💰 P&L\n` +
+    `  Total: ${report.total_pnl_pts} pts\n` +
+    `  Avg per trade: ${report.avg_pnl_pts ?? "N/A"} pts\n` +
+    `  Avg R:R: ${report.avg_rr ?? "N/A"}\n` +
+    `  Profit factor: ${report.profit_factor === Infinity ? "∞" : (report.profit_factor ?? "N/A")}\n\n` +
+    `🎯 vs 1% Target: ${vsTarget}\n`;
+
+  if (report.best_trade) {
+    msg += `\n🏆 Best: ${report.best_trade.pnl > 0 ? "+" : ""}${report.best_trade.pnl} pts (${report.best_trade.signal}, ${report.best_trade.session})`;
+  }
+  if (report.worst_trade) {
+    msg += `\n📉 Worst: ${report.worst_trade.pnl > 0 ? "+" : ""}${report.worst_trade.pnl} pts (${report.worst_trade.signal}, ${report.worst_trade.session})`;
+  }
+
+  // Session breakdown
+  const sessions = Object.entries(report.by_session);
+  if (sessions.length > 0) {
+    msg += `\n\n📋 By Session`;
+    for (const [sess, data] of sessions) {
+      msg += `\n  ${sess}: ${data.trades} trades, ${data.pnl > 0 ? "+" : ""}${parseFloat(data.pnl.toFixed(2))} pts (${data.wins}W)`;
+    }
+  }
+
+  // Close method breakdown
+  const closeMethods = Object.entries(report.by_closed_by);
+  if (closeMethods.length > 0) {
+    msg += `\n\n🔒 Close Methods`;
+    for (const [method, count] of closeMethods) {
+      msg += `\n  ${method}: ${count}`;
+    }
+  }
+
+  return msg;
+}
+
+async function sendWeeklyReportTelegram(weeksBack = 0) {
+  const report = await generateWeeklyReport(weeksBack);
+  if (report.error) {
+    log("WARN", "REPORT", "Report generation failed", { error: report.error });
+    return { ok: false, error: report.error };
+  }
+
+  const msg = formatWeeklyReportTelegram(report);
+
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) {
+    log("WARN", "REPORT", "Telegram not configured — report generated but not sent");
+    return { ok: false, reason: "telegram_not_configured", report };
+  }
+
+  const results = await Promise.allSettled(
+    TELEGRAM_CHAT_IDS.map(async (chatId) => {
+      const res = await fetchWithTimeout(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: msg }),
+        },
+        10000
+      );
+      const data = await res.json();
+      if (!data.ok) log("WARN", "REPORT", `Telegram send failed for ${chatId}`, { description: data.description });
+      return { chatId, ...data };
+    })
+  );
+
+  const sent = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
+  log("INFO", "REPORT", `Weekly report sent to ${sent}/${TELEGRAM_CHAT_IDS.length} users`);
+  return { ok: sent > 0, sent, total: TELEGRAM_CHAT_IDS.length, report };
+}
+
+// On-demand weekly report endpoint
+app.get("/report/weekly", async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: "Weekly reports require Supabase" });
+
+  const weeksBack = parseInt(req.query.weeks_back || "0", 10);
+  const sendTg = req.query.send !== "false"; // send Telegram by default
+
+  if (sendTg) {
+    const result = await sendWeeklyReportTelegram(weeksBack);
+    res.json(result);
+  } else {
+    const report = await generateWeeklyReport(weeksBack);
+    res.json(report);
+  }
+});
+
 // ── Health endpoint ────────────────────────────────────────────────────────
 app.get("/", (req, res) =>
   res.json({
