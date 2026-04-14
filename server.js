@@ -211,6 +211,9 @@ async function journalSignal(payload, signal, telegramResult) {
     telegram_ok: telegramResult?.ok ?? null,
   };
 
+  // Determine trade status: actual trades are 'open', NO_TRADE signals are 'skipped'
+  const tradeStatus = signal.signal !== "NO_TRADE" ? "open" : "skipped";
+
   if (supabase) {
     const { error } = await supabase.from("signals").insert({
       ts: entry.ts,
@@ -225,6 +228,7 @@ async function journalSignal(payload, signal, telegramResult) {
       reason: entry.reason,
       mtf: entry.mtf,
       telegram_ok: entry.telegram_ok,
+      status: tradeStatus,
     });
     if (error) {
       log("ERROR", "JOURNAL", "Supabase insert failed — falling back to JSONL", { error: error.message });
@@ -589,6 +593,138 @@ app.post("/webhook", async (req, res) => {
     log("ERROR", "WEBHOOK", "Erro interno", { error: err.message });
     res.status(500).json({ error: "Erro interno ao processar signal" });
   }
+});
+
+// ── Trade Outcome Tracker — close trades + stats ─────────────────────────
+
+// Close a trade by signal ID
+app.post("/close-trade", async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: "Trade tracking requires Supabase" });
+
+  const { signal_id, close_price, closed_by } = req.body;
+
+  if (!signal_id || typeof close_price !== "number")
+    return res.status(400).json({ error: "signal_id (number) and close_price (number) are required" });
+
+  const validClosedBy = ["tp", "sl", "manual", "timeout"];
+  const closeReason = validClosedBy.includes(closed_by) ? closed_by : "manual";
+
+  // Fetch the open trade
+  const { data: trade, error: fetchErr } = await supabase
+    .from("signals")
+    .select("id, signal, entry, sl, tp, status")
+    .eq("id", signal_id)
+    .single();
+
+  if (fetchErr || !trade)
+    return res.status(404).json({ error: `Trade ${signal_id} not found` });
+
+  if (trade.status !== "open")
+    return res.status(409).json({ error: `Trade ${signal_id} is already ${trade.status}` });
+
+  // Calculate P&L in points
+  let pnl_pts = null;
+  if (typeof trade.entry === "number") {
+    pnl_pts = trade.signal === "LONG"
+      ? close_price - trade.entry
+      : trade.entry - close_price;
+    pnl_pts = parseFloat(pnl_pts.toFixed(2));
+  }
+
+  const close_ts = new Date().toISOString();
+
+  const { error: updateErr } = await supabase
+    .from("signals")
+    .update({ status: "closed", close_price, close_ts, pnl_pts, closed_by: closeReason })
+    .eq("id", signal_id);
+
+  if (updateErr) {
+    log("ERROR", "TRADE_TRACKER", "Failed to close trade", { error: updateErr.message });
+    return res.status(500).json({ error: "Failed to close trade" });
+  }
+
+  log("INFO", "TRADE_TRACKER", `Trade ${signal_id} closed`, { pnl_pts, closed_by: closeReason });
+  res.json({ ok: true, trade: { id: signal_id, pnl_pts, close_price, closed_by: closeReason, close_ts } });
+});
+
+// List open trades
+app.get("/open-trades", async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: "Trade tracking requires Supabase" });
+
+  const { data, error } = await supabase
+    .from("signals")
+    .select("id, ts, session, signal, entry, sl, tp, risk_pts, confidence")
+    .eq("status", "open")
+    .order("ts", { ascending: false });
+
+  if (error) {
+    log("ERROR", "TRADE_TRACKER", "Failed to fetch open trades", { error: error.message });
+    return res.status(500).json({ error: "Failed to fetch open trades" });
+  }
+
+  res.json({ count: data.length, trades: data });
+});
+
+// Performance stats for closed trades
+app.get("/stats", async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: "Trade tracking requires Supabase" });
+
+  const { data, error } = await supabase
+    .from("signals")
+    .select("signal, entry, sl, tp, close_price, pnl_pts, closed_by")
+    .eq("status", "closed")
+    .neq("closed_by", "unknown");
+
+  if (error) {
+    log("ERROR", "TRADE_TRACKER", "Failed to fetch stats", { error: error.message });
+    return res.status(500).json({ error: "Failed to fetch stats" });
+  }
+
+  if (data.length === 0) {
+    return res.json({
+      total_trades: 0,
+      wins: 0,
+      losses: 0,
+      win_rate: null,
+      avg_pnl_pts: null,
+      avg_rr: null,
+      profit_factor: null,
+      by_closed_by: {},
+    });
+  }
+
+  let wins = 0, losses = 0, totalPnl = 0, totalRR = 0, grossProfit = 0, grossLoss = 0;
+  const byClosedBy = {};
+
+  for (const t of data) {
+    const pnl = t.pnl_pts ?? 0;
+    totalPnl += pnl;
+
+    if (pnl > 0) { wins++; grossProfit += pnl; }
+    else { losses++; grossLoss += Math.abs(pnl); }
+
+    // Actual R:R
+    if (typeof t.entry === "number" && typeof t.sl === "number") {
+      const risk = Math.abs(t.entry - t.sl);
+      if (risk > 0) totalRR += pnl / risk;
+    }
+
+    const cb = t.closed_by || "unknown";
+    byClosedBy[cb] = (byClosedBy[cb] || 0) + 1;
+  }
+
+  const total = data.length;
+  res.json({
+    total_trades: total,
+    wins,
+    losses,
+    win_rate: parseFloat((wins / total * 100).toFixed(1)),
+    avg_pnl_pts: parseFloat((totalPnl / total).toFixed(2)),
+    avg_rr: parseFloat((totalRR / total).toFixed(2)),
+    profit_factor: grossLoss > 0 ? parseFloat((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? Infinity : 0,
+    total_pnl_pts: parseFloat(totalPnl.toFixed(2)),
+    by_closed_by: byClosedBy,
+  });
 });
 
 // ── Health endpoint ────────────────────────────────────────────────────────
