@@ -39,6 +39,9 @@ function log(level, component, msg, extra = {}) {
   (level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log)(JSON.stringify(entry));
 }
 
+// ── Global state ──────────────────────────────────────────────────────────
+let lastError = null;
+
 // ── Rate Limiting ──────────────────────────────────────────────────────────
 const rateStore = new Map();
 const RATE_LIMIT     = 10;
@@ -513,6 +516,7 @@ app.get("/", (req, res) =>
     journal:      supabase ? "supabase (persistent)" : `jsonl: ${JOURNAL_PATH} (ephemeral)`,
     notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
+    last_error:   lastError,
   })
 );
 
@@ -564,11 +568,63 @@ app.get("/journal", async (req, res) => {
   }
 });
 
+// ── Operational health alert helper ────────────────────────────────────────
+async function sendHealthAlert(text) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_CHAT_IDS.length === 0) return;
+  await Promise.allSettled(
+    TELEGRAM_CHAT_IDS.map((chatId) =>
+      fetchWithTimeout(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+        },
+        10000
+      ).catch(() => {})
+    )
+  );
+}
+
 // ── Arranque + graceful shutdown ───────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const server = app.listen(PORT, () =>
-  log("INFO", "STARTUP", `Server v3 running on port ${PORT}`)
-);
+const server = app.listen(PORT, () => {
+  log("INFO", "STARTUP", `Server v4 running on port ${PORT}`);
+  sendHealthAlert(
+    `✅ Server online — MNQ Signal Server v4\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `🔌 Port: ${PORT}\n` +
+    `📦 Journal: ${supabase ? "Supabase (persistent)" : "JSONL (ephemeral)"}\n` +
+    `🕐 ${new Date().toISOString()}`
+  );
+});
+
+// ── Crash handlers — alert via Telegram before dying ──────────────────────
+process.on("uncaughtException", async (err) => {
+  lastError = { message: err.message, stack: err.stack, ts: new Date().toISOString() };
+  log("FATAL", "PROCESS", "uncaughtException", { error: err.message, stack: err.stack });
+  await sendHealthAlert(
+    `🔴 CRASH — MNQ Signal Server\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `💥 uncaughtException\n` +
+    `❌ ${err.message}\n` +
+    `🕐 ${new Date().toISOString()}`
+  ).catch(() => {});
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  lastError = { message: msg, ts: new Date().toISOString() };
+  log("FATAL", "PROCESS", "unhandledRejection", { error: msg });
+  await sendHealthAlert(
+    `🟠 UNHANDLED REJECTION — MNQ Signal Server\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `⚠️ ${msg}\n` +
+    `🕐 ${new Date().toISOString()}`
+  ).catch(() => {});
+  process.exit(1);
+});
 
 function gracefulShutdown(signal) {
   log("INFO", "SHUTDOWN", `${signal} recebido — a encerrar...`);
