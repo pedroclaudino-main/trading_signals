@@ -86,6 +86,23 @@ curl https://SEU-PROJETO.railway.app/
 
 ---
 
+## Weekly Performance Reports
+
+Automated P&L reports delivered via Telegram. Reports include trade count, win rate, total P&L, profit factor, session breakdown, best/worst trades, and comparison against the 1% weekly return target.
+
+```bash
+# Generate + send current week's report via Telegram
+curl https://SEU-PROJETO.railway.app/report/weekly
+
+# Get report data without sending Telegram
+curl https://SEU-PROJETO.railway.app/report/weekly?send=false
+
+# Get last week's report
+curl https://SEU-PROJETO.railway.app/report/weekly?weeks_back=1
+```
+
+---
+
 ## Janelas de trading (hora de Lisboa)
 
 | Janela | Horário Lisboa | Equivalente NY |
