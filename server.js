@@ -16,6 +16,10 @@ const JOURNAL_PATH       = process.env.JOURNAL_PATH || "./trade_journal.jsonl";
 const SUPABASE_URL       = process.env.SUPABASE_URL;
 const SUPABASE_KEY       = process.env.SUPABASE_KEY;
 
+// Apex Risk Guard config
+const APEX_MAX_DAILY_SIGNALS = parseInt(process.env.APEX_MAX_DAILY_SIGNALS || "10", 10);
+const APEX_DAILY_LOSS_LIMIT  = parseFloat(process.env.APEX_DAILY_LOSS_LIMIT || "150"); // points
+
 if (!ANTHROPIC_API_KEY) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "FATAL", msg: "ANTHROPIC_API_KEY não definida" }));
   process.exit(1);
@@ -41,6 +45,61 @@ function log(level, component, msg, extra = {}) {
 
 // ── Global state ──────────────────────────────────────────────────────────
 let lastError = null;
+
+// ── Apex Risk Guard — daily risk state ────────────────────────────────────
+const dailyRisk = {
+  date: null,           // YYYY-MM-DD in ET
+  signalCount: 0,       // signals sent today
+  totalRiskPts: 0,      // sum of risk_pts for all signals sent today
+  halted: false,        // true if daily limit reached
+  signals: [],          // brief log of today's signals
+};
+
+function getETDate() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+function resetDailyRiskIfNewDay() {
+  const today = getETDate();
+  if (dailyRisk.date !== today) {
+    dailyRisk.date = today;
+    dailyRisk.signalCount = 0;
+    dailyRisk.totalRiskPts = 0;
+    dailyRisk.halted = false;
+    dailyRisk.signals = [];
+    log("INFO", "RISK_GUARD", `Daily risk state reset for ${today}`);
+  }
+}
+
+function checkDailyRiskLimit() {
+  resetDailyRiskIfNewDay();
+  if (dailyRisk.signalCount >= APEX_MAX_DAILY_SIGNALS) {
+    return { blocked: true, reason: `Daily signal limit reached (${dailyRisk.signalCount}/${APEX_MAX_DAILY_SIGNALS})` };
+  }
+  if (dailyRisk.totalRiskPts >= APEX_DAILY_LOSS_LIMIT) {
+    return { blocked: true, reason: `Daily risk exposure limit reached (${dailyRisk.totalRiskPts.toFixed(1)}/${APEX_DAILY_LOSS_LIMIT} pts)` };
+  }
+  return { blocked: false };
+}
+
+function recordSignalRisk(signal) {
+  resetDailyRiskIfNewDay();
+  dailyRisk.signalCount++;
+  dailyRisk.totalRiskPts += typeof signal.risk_pts === "number" ? signal.risk_pts : 0;
+  dailyRisk.signals.push({
+    ts: new Date().toISOString(),
+    signal: signal.signal,
+    risk_pts: signal.risk_pts,
+    entry: signal.entry,
+  });
+  if (dailyRisk.signalCount >= APEX_MAX_DAILY_SIGNALS || dailyRisk.totalRiskPts >= APEX_DAILY_LOSS_LIMIT) {
+    dailyRisk.halted = true;
+    log("WARN", "RISK_GUARD", "Daily limit reached — halting signals", {
+      signalCount: dailyRisk.signalCount,
+      totalRiskPts: dailyRisk.totalRiskPts,
+    });
+  }
+}
 
 // ── Rate Limiting ──────────────────────────────────────────────────────────
 const rateStore = new Map();
@@ -418,6 +477,31 @@ app.post("/webhook", async (req, res) => {
     ip: clientIp,
   });
 
+  // 6. Apex Risk Guard — check daily limits before processing
+  const riskCheck = checkDailyRiskLimit();
+  if (riskCheck.blocked) {
+    log("WARN", "RISK_GUARD", "Signal blocked by daily risk limit", { reason: riskCheck.reason });
+    const blockedSignal = {
+      signal: "NO_TRADE",
+      reason: `🛑 Apex Risk Guard: ${riskCheck.reason}`,
+      no_trade_reason: "daily_risk_limit",
+      entry: null, sl: null, tp: null, risk_pts: null,
+      confidence: "LOW", mtf_aligned: false,
+    };
+    if (!dailyRisk._alertSent) {
+      dailyRisk._alertSent = true;
+      sendHealthAlert(
+        `🛑 APEX RISK GUARD — Daily Limit Reached\n` +
+        `━━━━━━━━━━━━━━━━━\n` +
+        `📊 ${riskCheck.reason}\n` +
+        `🔒 All signals blocked until midnight ET\n` +
+        `🕐 ${new Date().toISOString()}`
+      ).catch(() => {});
+    }
+    journalSignal(req.body, blockedSignal, null);
+    return res.json({ ok: true, signal: blockedSignal, risk_blocked: true });
+  }
+
   try {
     const payload = JSON.stringify({
       candles_1m, broken_ob, fvgs, swings, mtf,
@@ -478,6 +562,8 @@ app.post("/webhook", async (req, res) => {
 
     let telegramResult = null;
     if (signal.signal !== "NO_TRADE") {
+      // Record risk before sending — Apex Risk Guard
+      recordSignalRisk(signal);
       try {
         telegramResult = await sendTelegram(signal);
       } catch (err) {
@@ -519,6 +605,22 @@ app.get("/", (req, res) =>
     last_error:   lastError,
   })
 );
+
+// ── Risk status endpoint ──────────────────────────────────────────────────
+app.get("/risk-status", (req, res) => {
+  resetDailyRiskIfNewDay();
+  res.json({
+    date: dailyRisk.date,
+    signals_today: dailyRisk.signalCount,
+    max_daily_signals: APEX_MAX_DAILY_SIGNALS,
+    total_risk_pts: dailyRisk.totalRiskPts,
+    daily_loss_limit_pts: APEX_DAILY_LOSS_LIMIT,
+    halted: dailyRisk.halted,
+    remaining_signals: Math.max(0, APEX_MAX_DAILY_SIGNALS - dailyRisk.signalCount),
+    remaining_risk_pts: Math.max(0, APEX_DAILY_LOSS_LIMIT - dailyRisk.totalRiskPts),
+    signals: dailyRisk.signals,
+  });
+});
 
 // ── Journal viewer (últimos N sinais) ─────────────────────────────────────
 app.get("/journal", async (req, res) => {
