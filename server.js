@@ -21,6 +21,7 @@ const APEX_MAX_DAILY_SIGNALS = parseInt(process.env.APEX_MAX_DAILY_SIGNALS || "1
 const APEX_DAILY_LOSS_LIMIT  = parseFloat(process.env.APEX_DAILY_LOSS_LIMIT || "150"); // points
 
 // News Event Filter config
+const NEWS_FILTER_ENABLED      = (process.env.NEWS_FILTER_ENABLED || "true") !== "false";
 const NEWS_SUPPRESS_WINDOW_MIN = parseInt(process.env.NEWS_SUPPRESS_WINDOW_MIN || "15", 10);
 const NEWS_SUPPRESS_MODE       = process.env.NEWS_SUPPRESS_MODE || "block"; // "block" | "warn"
 
@@ -234,7 +235,7 @@ function checkNewsFilter(events) {
 }
 
 // Pre-warm the cache on startup
-fetchEconomicCalendar().catch(() => {});
+if (NEWS_FILTER_ENABLED) fetchEconomicCalendar().catch(() => {});
 
 // Refresh cache daily at 00:05 ET
 setInterval(() => {
@@ -650,7 +651,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   // 7. News Event Filter — suppress signals near high-impact economic events
-  const newsEvents = await fetchEconomicCalendar();
+  const newsEvents = NEWS_FILTER_ENABLED ? await fetchEconomicCalendar() : [];
   const newsCheck = checkNewsFilter(newsEvents);
   if (newsCheck.blocked) {
     log("WARN", "NEWS_FILTER", "Signal suppressed due to high-impact news event", {
@@ -910,8 +911,8 @@ async function generateWeeklyReport(weeksBack = 0) {
   if (!supabase) return { error: "Weekly reports require Supabase" };
 
   // Calculate week boundaries (Mon 00:00 ET to Sun 23:59 ET)
-  const now = getETDate();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const todayStr = getETDate(); // "YYYY-MM-DD" string in ET
+  const today = new Date(todayStr + "T00:00:00");
   const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon...
   const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
 
@@ -1115,7 +1116,7 @@ app.get("/", (req, res) =>
     telegram:     TELEGRAM_BOT_TOKEN ? `configured (${TELEGRAM_CHAT_IDS.length} users)` : "not_configured",
     webhook_auth: WEBHOOK_SECRET ? "enabled" : "disabled",
     journal:      supabase ? "supabase (persistent)" : `jsonl: ${JOURNAL_PATH} (ephemeral)`,
-    news_filter:  `${NEWS_SUPPRESS_MODE} (±${NEWS_SUPPRESS_WINDOW_MIN}min)`,
+    news_filter:  NEWS_FILTER_ENABLED ? `${NEWS_SUPPRESS_MODE} (±${NEWS_SUPPRESS_WINDOW_MIN}min)` : "disabled",
     notify_no_trade: NOTIFY_NO_TRADE,
     uptime_s:     Math.floor(process.uptime()),
     last_error:   lastError,
@@ -1140,9 +1141,10 @@ app.get("/risk-status", (req, res) => {
 
 // ── News filter status endpoint ───────────────────────────────────────────
 app.get("/news-status", async (req, res) => {
-  const events = await fetchEconomicCalendar();
+  const events = NEWS_FILTER_ENABLED ? await fetchEconomicCalendar() : [];
   const check = checkNewsFilter(events);
   res.json({
+    enabled: NEWS_FILTER_ENABLED,
     mode: NEWS_SUPPRESS_MODE,
     window_min: NEWS_SUPPRESS_WINDOW_MIN,
     cached_date: newsCache.date,
