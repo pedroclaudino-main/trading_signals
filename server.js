@@ -502,7 +502,7 @@ async function journalSignal(payload, signal, telegramResult, instrument) {
   const tradeStatus = signal.signal !== "NO_TRADE" ? "open" : "skipped";
 
   if (supabase) {
-    const { error } = await supabase.from("signals").insert({
+    const row = {
       ts: entry.ts,
       instrument: inst,
       session: entry.session,
@@ -517,7 +517,14 @@ async function journalSignal(payload, signal, telegramResult, instrument) {
       mtf: entry.mtf,
       telegram_ok: entry.telegram_ok,
       status: tradeStatus,
-    });
+    };
+    let { error } = await supabase.from("signals").insert(row);
+    // Graceful fallback if instrument column not yet added (migration 003)
+    if (error && error.message && error.message.includes("instrument")) {
+      log("WARN", "JOURNAL", "instrument column missing — retrying without it (run migration 003)", { error: error.message });
+      const { instrument: _omit, ...rowNoInst } = row;
+      ({ error } = await supabase.from("signals").insert(rowNoInst));
+    }
     if (error) {
       log("ERROR", "JOURNAL", "Supabase insert failed — falling back to JSONL", { error: error.message });
       journalSignalToFile(entry);
@@ -1085,16 +1092,15 @@ app.get("/stats/sessions", async (req, res) => {
   const since = new Date();
   since.setDate(since.getDate() - days);
 
+  const selectCols = "session, signal, pnl_pts, closed_by, confidence, risk_pts, entry, sl";
   let query = supabase
     .from("signals")
-    .select("session, signal, pnl_pts, closed_by, confidence, risk_pts, entry, sl, instrument")
+    .select(selectCols)
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  if (instrument) query = query.eq("instrument", instrument);
-
-  const { data, error } = await query;
+  let { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch session stats" });
 
   const sessions = {};
@@ -1137,14 +1143,12 @@ app.get("/stats/parameters", async (req, res) => {
 
   let query = supabase
     .from("signals")
-    .select("signal, pnl_pts, confidence, risk_pts, entry, sl, tp, close_price, closed_by, instrument")
+    .select("signal, pnl_pts, confidence, risk_pts, entry, sl, tp, close_price, closed_by")
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  if (instrument) query = query.eq("instrument", instrument);
-
-  const { data, error } = await query;
+  let { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch parameter stats" });
 
   if (data.length < 20) {
@@ -1244,14 +1248,12 @@ app.get("/tune", async (req, res) => {
 
   let query = supabase
     .from("signals")
-    .select("session, signal, pnl_pts, confidence, risk_pts, entry, sl, tp, closed_by, instrument")
+    .select("session, signal, pnl_pts, confidence, risk_pts, entry, sl, tp, closed_by")
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  if (instrument) query = query.eq("instrument", instrument);
-
-  const { data, error } = await query;
+  let { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch data for tuning" });
 
   if (data.length < 20) {
