@@ -5,7 +5,7 @@ indicator("MasterSignal v4", overlay=true, max_bars_back=500, max_labels_count=2
 // INPUTS
 // ═══════════════════════════════════════════════════════════════════════════
 var string WEBHOOK_URL    = input.string("https://mastersignal.up.railway.app/webhook", "Webhook URL")
-var string WEBHOOK_SECRET = input.string("", "Webhook Secret")
+var string WEBHOOK_SECRET = input.string("ImagineTryingAndFailing2026!", "Webhook Secret")
 
 swingLookback = input.int  (3,    "Swing Lookback",           minval=2,   maxval=20,  group="Estratégia")
 maxRiskPts    = input.float(50.0, "Max Risk (pontos)",         minval=5.0,             group="Estratégia")
