@@ -1092,15 +1092,16 @@ app.get("/stats/sessions", async (req, res) => {
   const since = new Date();
   since.setDate(since.getDate() - days);
 
-  const selectCols = "session, signal, pnl_pts, closed_by, confidence, risk_pts, entry, sl";
   let query = supabase
     .from("signals")
-    .select(selectCols)
+    .select("session, signal, pnl_pts, closed_by, confidence, risk_pts, entry, sl, instrument")
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  let { data, error } = await query;
+  if (instrument) query = query.eq("instrument", instrument);
+
+  const { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch session stats" });
 
   const sessions = {};
@@ -1143,12 +1144,14 @@ app.get("/stats/parameters", async (req, res) => {
 
   let query = supabase
     .from("signals")
-    .select("signal, pnl_pts, confidence, risk_pts, entry, sl, tp, close_price, closed_by")
+    .select("signal, pnl_pts, confidence, risk_pts, entry, sl, tp, close_price, closed_by, instrument")
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  let { data, error } = await query;
+  if (instrument) query = query.eq("instrument", instrument);
+
+  const { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch parameter stats" });
 
   if (data.length < 20) {
@@ -1248,12 +1251,14 @@ app.get("/tune", async (req, res) => {
 
   let query = supabase
     .from("signals")
-    .select("session, signal, pnl_pts, confidence, risk_pts, entry, sl, tp, closed_by")
+    .select("session, signal, pnl_pts, confidence, risk_pts, entry, sl, tp, closed_by, instrument")
     .eq("status", "closed")
     .neq("closed_by", "unknown")
     .gte("close_ts", since.toISOString());
 
-  let { data, error } = await query;
+  if (instrument) query = query.eq("instrument", instrument);
+
+  const { data, error } = await query;
   if (error) return res.status(500).json({ error: "Failed to fetch data for tuning" });
 
   if (data.length < 20) {
