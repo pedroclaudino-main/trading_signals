@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "backtest": "node backtest.js",
     "journal": "cat trade_journal.jsonl | tail -20 | jq ."
   },
   "dependencies": {
